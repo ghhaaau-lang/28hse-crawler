@@ -1,0 +1,3 @@
+sites:
+  - name: "28hse_rent"
+    url: "https://www.28hse.com/rent"
