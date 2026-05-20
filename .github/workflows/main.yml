@@ -19,10 +19,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests pyyaml
-          # 安裝 signal-cli
-          wget https://github.com/AsamK/signal-cli/releases/download/v0.13.0/signal-cli-0.13.0.tar.gz
-          tar xf signal-cli-0.13.0.tar.gz
-          sudo mv signal-cli-0.13.0 /opt/signal-cli
+          # 使用較舊版本的 signal-cli
+          wget https://github.com/AsamK/signal-cli/releases/download/v0.11.0/signal-cli-0.11.0.tar.gz
+          tar xf signal-cli-0.11.0.tar.gz
+          sudo mv signal-cli-0.11.0 /opt/signal-cli
 
       - name: Run crawler with Signal
         env:
