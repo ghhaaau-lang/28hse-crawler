@@ -1,18 +1,25 @@
 import os
 import json
-import pywhatkit as kit
-from datetime import datetime
+import subprocess
+import requests
+import yaml
 
-# ==================== 請修改這裡 ====================
-YOUR_WHATSAPP = "+85255890940"   # ← 改成你的 WhatsApp 號碼（含國碼）
-# ==================================================
+SIGNAL_PHONE = os.environ.get("SIGNAL_PHONE")
+SIGNAL_RECIPIENT = os.environ.get("SIGNAL_RECIPIENT")
 
-def send_whatsapp(message):
+def send_signal(message):
     try:
-        kit.sendwhatmsg_instantly(YOUR_WHATSAPP, message, wait_time=10, tab_close=True)
-        print("✅ WhatsApp 已發送")
+        cmd = [
+            "/opt/signal-cli/bin/signal-cli",
+            "-u", SIGNAL_PHONE,
+            "send",
+            "-m", message,
+            SIGNAL_RECIPIENT
+        ]
+        subprocess.run(cmd, check=True)
+        print("✅ Signal 訊息已發送")
     except Exception as e:
-        print(f"❌ WhatsApp 發送失敗: {e}")
+        print(f"❌ Signal 發送失敗: {e}")
 
 def check_new_listings():
     with open("sites.yaml", "r", encoding="utf-8") as f:
@@ -26,14 +33,14 @@ def check_new_listings():
 
     new_count = 0
     for site in sites:
-        # 這裡簡化版，之後可以再加強
-        new_count += 1   # 暫時測試用
+        # 這裡可以加強抓取邏輯
+        new_count += 1
 
     if new_count > 0:
         msg = f"🆕 發現 {new_count} 個新業主樓盤！\n請查看最新訊息。"
-        send_whatsapp(msg)
+        send_signal(msg)
 
-    return f"檢查完成"
+    return f"檢查完成，新增 {new_count} 筆"
 
 if __name__ == "__main__":
     check_new_listings()
