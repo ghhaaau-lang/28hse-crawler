@@ -16,51 +16,75 @@ def get_headers():
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-HK,zh-TW;q=0.9,en;q=0.7",
-        "Referer": "https://www.28hse.com/",
+        "Referer": "https://www.28hse.com/rent/apartment?owner_type=1",
     }
 
 
-def print_context(text, keyword, limit=20, window=240):
-    matches = list(re.finditer(keyword, text, re.IGNORECASE))
-    print(f"\n========== keyword: {keyword} / {len(matches)} 次 ==========")
-
-    for i, m in enumerate(matches[:limit], 1):
-        start = max(0, m.start() - window)
-        end = min(len(text), m.end() + window)
-        snippet = text[start:end]
-        snippet = re.sub(r"\s+", " ", snippet)
-        print(f"\n--- {keyword} context {i} ---")
-        print(snippet)
-
-
-def extract_candidates(text):
+def extract_clean_candidates(text):
     patterns = [
-        r'["\']([^"\']*api[^"\']*)["\']',
-        r'["\']([^"\']*ajax[^"\']*)["\']',
-        r'["\']([^"\']*search[^"\']*)["\']',
-        r'["\']([^"\']*property[^"\']*)["\']',
-        r'["\']([^"\']*listing[^"\']*)["\']',
-        r'["\']([^"\']*rent[^"\']*)["\']',
+        r'["\'](https?://[^"\']+)["\']',
+        r'["\'](//[^"\']+)["\']',
+        r'["\'](/[^"\']*(?:api|ajax|search|property|listing|rent|estate|item)[^"\']*)["\']',
         r'url\s*:\s*["\']([^"\']+)["\']',
-        r'\.get\(\s*["\']([^"\']+)["\']',
-        r'\.post\(\s*["\']([^"\']+)["\']',
+        r'\$\.ajax\(\s*\{[^}]*url\s*:\s*["\']([^"\']+)["\']',
+        r'\$\.get\(\s*["\']([^"\']+)["\']',
+        r'\$\.post\(\s*["\']([^"\']+)["\']',
         r'fetch\(\s*["\']([^"\']+)["\']',
     ]
 
     found = set()
 
     for pattern in patterns:
-        for m in re.findall(pattern, text, re.IGNORECASE):
+        for m in re.findall(pattern, text, re.IGNORECASE | re.DOTALL):
             if isinstance(m, tuple):
                 m = m[0]
-            if any(k in m.lower() for k in ["api", "ajax", "search", "property", "listing", "rent", "estate", "item"]):
-                found.add(m)
+
+            m = m.strip()
+
+            if not m:
+                continue
+
+            # 過濾掉太長的 JS 片段
+            if len(m) > 220:
+                continue
+
+            # 過濾掉明顯不是路徑/URL 的東西
+            if not (
+                m.startswith("/")
+                or m.startswith("http")
+                or m.startswith("//")
+            ):
+                continue
+
+            # 過濾圖片 / css / 字型
+            lower = m.lower()
+            if any(x in lower for x in [".png", ".jpg", ".jpeg", ".gif", ".css", ".woff", ".svg"]):
+                continue
+
+            found.add(m)
 
     return sorted(found)
 
 
+def print_keyword_lines(text, keyword, limit=30):
+    lines = text.splitlines()
+    matched = []
+
+    for i, line in enumerate(lines, 1):
+        if keyword.lower() in line.lower():
+            line = re.sub(r"\s+", " ", line).strip()
+            if len(line) > 350:
+                line = line[:350] + "..."
+            matched.append((i, line))
+
+    print(f"\n========== lines containing: {keyword} / {len(matched)} ==========")
+
+    for line_no, line in matched[:limit]:
+        print(f"L{line_no}: {line}")
+
+
 def main():
-    print("🚀 28hse JS Endpoint Debug started")
+    print("🚀 28hse Clean Endpoint Debug started")
 
     session = requests.Session()
     headers = get_headers()
@@ -80,65 +104,67 @@ def main():
         script_urls.append(full)
 
     print(f"\n📜 script 數量：{len(script_urls)}")
-    for i, u in enumerate(script_urls, 1):
-        print(f"script {i}: {u}")
+    for i, url in enumerate(script_urls, 1):
+        print(f"script {i}: {url}")
 
     all_candidates = set()
 
-    print("\n========== Page HTML candidates ==========")
-    page_candidates = extract_candidates(r.text)
+    print("\n========== PAGE CLEAN CANDIDATES ==========")
+    page_candidates = extract_clean_candidates(r.text)
+
     for c in page_candidates:
         all_candidates.add(c)
-        print("page candidate:", c)
+        print("page:", c)
 
-    print_context(r.text, "propertyDoSearchVersion", limit=10)
-    print_context(r.text, "item_ids", limit=10)
-    print_context(r.text, "owner_type", limit=10)
-    print_context(r.text, "search_words", limit=10)
+    print_keyword_lines(r.text, "autocomplete_action_url")
+    print_keyword_lines(r.text, "searchbarAutocompleteCfg")
+    print_keyword_lines(r.text, "propertyDoSearchVersion")
+    print_keyword_lines(r.text, "item_ids")
+    print_keyword_lines(r.text, "owner_type")
+    print_keyword_lines(r.text, "ajax")
+    print_keyword_lines(r.text, "url:")
 
-    print("\n========== Fetch JS files ==========")
+    print("\n========== JS CLEAN CANDIDATES ==========")
 
     for idx, js_url in enumerate(script_urls, 1):
         try:
-            jr = session.get(js_url, headers={**headers, "Referer": PAGE_URL}, timeout=20)
+            jr = session.get(js_url, headers=headers, timeout=20)
             print(f"\n--- JS {idx}: {js_url}")
             print(f"status={jr.status_code}, length={len(jr.text)}")
 
             if jr.status_code != 200:
                 continue
 
-            text = jr.text
-            candidates = extract_candidates(text)
+            candidates = extract_clean_candidates(jr.text)
 
-            print(f"candidate count={len(candidates)}")
-            for c in candidates[:120]:
+            for c in candidates:
                 all_candidates.add(c)
-                print("candidate:", c)
+                print("js:", c)
 
-            for kw in [
+            for keyword in [
+                "autocomplete_action_url",
+                "searchbarAutocompleteCfg",
                 "propertyDoSearchVersion",
                 "item_ids",
                 "owner_type",
-                "search_words",
                 "ajax",
-                "api",
-                "rent",
-                "listing",
+                "url:",
+                "search",
                 "property",
+                "rent",
             ]:
-                if kw.lower() in text.lower():
-                    print_context(text, kw, limit=8)
+                print_keyword_lines(jr.text, keyword, limit=15)
 
         except Exception as e:
-            print(f"JS fetch failed: {e}")
+            print(f"⚠️ JS fetch failed: {e}")
 
-    print("\n========== ALL UNIQUE CANDIDATES ==========")
-    print(f"total candidates: {len(all_candidates)}")
+    print("\n========== ALL UNIQUE CLEAN CANDIDATES ==========")
+    print(f"total: {len(all_candidates)}")
 
     for i, c in enumerate(sorted(all_candidates), 1):
         print(f"{i}. {c}")
 
-    print("\n✅ JS Endpoint Debug finished")
+    print("\n✅ Clean Endpoint Debug finished")
 
 
 if __name__ == "__main__":
