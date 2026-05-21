@@ -1,4 +1,4 @@
-name: House730 Debug
+name: threezero Debug
 
 on:
   workflow_dispatch:
@@ -20,6 +20,6 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      - name: Run House730 debug
+      - name: Run threezero debug
         run: |
-          python house730_debug.py
+          python threezero_debug.py
