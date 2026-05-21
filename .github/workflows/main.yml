@@ -5,6 +5,9 @@ on:
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -29,3 +32,16 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python app.py
+
+      - name: Commit processed ids
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          if [ -f processed_ids.json ]; then
+            git add processed_ids.json
+            git diff --cached --quiet || git commit -m "Update processed ids"
+            git push
+          else
+            echo "processed_ids.json not found, skip commit"
+          fi
