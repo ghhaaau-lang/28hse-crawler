@@ -62,7 +62,6 @@ def send_discord_message(message_text):
         print("❌ 找不到 DISCORD_WEBHOOK_URL，請檢查 GitHub Secrets")
         return False
 
-    # Discord 單則 content 約 2000 字，保守切 1800
     chunks = []
     text = message_text.strip()
 
@@ -148,6 +147,8 @@ def build_params():
         "developer_by_text": "0",
         "more_options": "",
         "more_options_by_text": "0",
+
+        # ✅ 第一層：請求 28hse 只回業主盤
         "owner_type": "1",
     }
 
@@ -204,8 +205,14 @@ def extract_result_html_from_json(data):
 
 def parse_result_content_html(html):
     """
-    只保留主樓盤連結：
+    只保留 28hse 主樓盤連結：
     https://www.28hse.com/rent/apartment/property-3857733
+
+    業主盤限定邏輯：
+    1. 只抓 property-數字主頁
+    2. 排除代理 / 地產 / 經紀字眼
+    3. 優先保留含 業主 / 免佣 / 自讓 / 直接業主 的盤
+    4. 如果 API 已經是 owner_type=1，但卡片沒寫業主，仍暫時保留，避免漏盤
     """
     soup = BeautifulSoup(html, "html.parser")
 
@@ -213,8 +220,30 @@ def parse_result_content_html(html):
     print(f"🔗 resultContentHtml a[href] 數量：{len(links)}")
 
     listings = {}
-    current_property_id = None
-    current_title_parts = []
+
+    owner_keywords = [
+        "業主",
+        "免佣",
+        "自讓",
+        "直接業主",
+        "業主盤",
+        "放租免佣",
+        "owner",
+        "no commission",
+    ]
+
+    agent_keywords = [
+        "代理",
+        "地產",
+        "經紀",
+        "中介",
+        "agency",
+        "agent",
+        "分行",
+    ]
+
+    excluded_agent_count = 0
+    unclear_owner_count = 0
 
     for a in links:
         raw_href = a.get("href", "")
@@ -229,32 +258,60 @@ def parse_result_content_html(html):
         property_id = match.group(1)
         house_id = f"28hse_{property_id}"
 
-        # 優先取有文字的 a text 作標題
+        card = (
+            a.find_parent("div", class_=re.compile(r"(result|property|listing|item|estate|search|content)", re.I))
+            or a.find_parent("div")
+        )
+
+        card_text = clean_text(card.get_text(" ", strip=True)) if card else text
+        card_text_lower = card_text.lower()
+
+        has_owner_keyword = any(k.lower() in card_text_lower for k in owner_keywords)
+        has_agent_keyword = any(k.lower() in card_text_lower for k in agent_keywords)
+
+        # ✅ 第二層：看到代理 / 地產 / 經紀，就排除
+        if has_agent_keyword:
+            excluded_agent_count += 1
+            print(f"🚫 排除疑似代理盤：{property_id} | {card_text[:90]}")
+            continue
+
+        # ⚠️ 這裡不硬性要求一定要有「業主」字眼
+        # 因為 API 已經 owner_type=1，有些卡片不一定每格都顯示業主/免佣
+        if not has_owner_keyword:
+            unclear_owner_count += 1
+            print(f"⚠️ 未明確標業主但先保留：{property_id} | {card_text[:90]}")
+
         if text and len(text) >= 2:
             title = text
         else:
             title = "28hse 業主盤"
 
-        # 同一個 property 可能有多個 a，例如價格、標題、圖片
-        # 用第一個有效 title，但如果後面 title 更像樓盤描述，就更新
+        # 過濾太短 title，例如「5」「9」「黃金」
+        if len(title) <= 2:
+            title = "28hse 業主盤"
+
         if house_id not in listings:
+            prefix = "[28hse業主]" if has_owner_keyword else "[28hse業主?]"
             listings[house_id] = {
                 "id": house_id,
-                "title": f"[28hse] {title[:90]}",
+                "title": f"{prefix} {title[:90]}",
                 "link": href,
             }
         else:
             old_title = listings[house_id]["title"]
 
-            # 過濾太短 title，例如「5」「9」「黃金」
-            if len(title) > 6 and len(old_title) < len(f"[28hse] {title}"):
-                listings[house_id]["title"] = f"[28hse] {title[:90]}"
+            if len(title) > 6 and len(old_title) < len(f"[28hse業主] {title}"):
+                prefix = "[28hse業主]" if has_owner_keyword else "[28hse業主?]"
+                listings[house_id]["title"] = f"{prefix} {title[:90]}"
 
     final = list(listings.values())
-    print(f"✅ 主樓盤 property 解析到：{len(final)} 筆")
+
+    print(f"🚫 排除代理盤：{excluded_agent_count} 筆")
+    print(f"⚠️ 未明確標業主但保留：{unclear_owner_count} 次")
+    print(f"✅ 業主盤過濾後 property 解析到：{len(final)} 筆")
 
     for i, item in enumerate(final[:10], 1):
-        print(f"sample {i}: {item['title']} | {item['link']}")
+        print(f"owner sample {i}: {item['title']} | {item['link']}")
 
     return final
 
@@ -264,9 +321,8 @@ def crawl_28hse_dosearch():
     headers = get_headers()
     params = build_params()
 
-    print("🚀 28hse /property/dosearch 正式版 started")
+    print("🚀 28hse /property/dosearch 業主限定版 started")
 
-    # 先打搜尋頁，建立 cookie
     first = session.get(
         SEARCH_PAGE,
         headers={
@@ -327,14 +383,14 @@ if __name__ == "__main__":
 
     all_listings = crawl_28hse_dosearch()
 
-    print(f"📦 總共抓到樓盤：{len(all_listings)} 筆")
+    print(f"📦 總共抓到業主樓盤：{len(all_listings)} 筆")
 
     new_listings = [
         item for item in all_listings
         if item["id"] not in processed_ids
     ]
 
-    print(f"🆕 新樓盤：{len(new_listings)} 筆")
+    print(f"🆕 新業主樓盤：{len(new_listings)} 筆")
 
     if new_listings:
         msg = f"🏠 **【28hse 業主盤通知】新發現 {len(new_listings)} 筆**\n"
@@ -350,9 +406,9 @@ if __name__ == "__main__":
 
         if ok:
             save_processed_ids(processed_ids)
-            print(f"🎉 成功推送 {len(new_listings)} 筆至 Discord")
+            print(f"🎉 成功推送 {len(new_listings)} 筆業主盤至 Discord")
         else:
             print("⚠️ Discord 發送失敗，暫不保存 processed_ids，避免漏通知")
 
     else:
-        print("沒有新樓盤更新。")
+        print("沒有新業主樓盤更新。")
