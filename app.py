@@ -59,4 +59,60 @@ def crawl_28hse():
             print(f"❌ 爬取失敗，網頁狀態碼: {response.status_code}")
             return None
             
-        soup =
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 抓取樓盤列表（根據 28hse 最新網頁結構定位）
+        items = soup.find_all('div', class_='property_item')
+        
+        new_listings = []
+        for item in items[:5]:  # 每次只取最新的前 5 筆，避免資訊爆炸
+            try:
+                title_el = item.find('a', class_='title')
+                price_el = item.find('div', class_='price')
+                
+                if title_el:
+                    title = title_el.text.strip()
+                    link = title_el['href']
+                    if not link.startswith('http'):
+                        link = f"https://www.28hse.com{link}"
+                        
+                    price = price_el.text.strip() if price_el else "面議"
+                    
+                    new_listings.append({
+                        "title": title,
+                        "price": price,
+                        "link": link
+                    })
+            except Exception as e:
+                continue
+                
+        return new_listings
+    except Exception as e:
+        print(f"❌ 爬蟲執行期間發生錯誤: {str(e)}")
+        return None
+
+
+# 🎯 主程式執行入口
+if __name__ == '__main__':
+    # 執行爬蟲
+    listings = crawl_28hse()
+    
+    if listings:
+        print(f"🎉 成功抓取到 {len(listings)} 筆最新樓盤！正在發送通知...")
+        
+        # 組合要發送到手機的訊息內容
+        msg_content = "🏠 【28hse 最新業主盤通知】\n"
+        msg_content += "-------------------------\n"
+        
+        for i, house in enumerate(listings, 1):
+            msg_content += f"{i}. {house['title']}\n"
+            msg_content += f"💰 價格: {house['price']}\n"
+            msg_content += f"🔗 詳情: {house['link']}\n"
+            msg_content += "-------------------------\n"
+            
+        # 🎯 真正呼叫發送功能，把資料推回你家電腦 Docker 噴射到手機
+        send_signal_message(msg_content)
+    else:
+        # 💡 防呆保險：如果網頁剛好沒更新，我們依然發送一條健康檢查，確保通訊正常
+        print("暫無新樓盤更新，發送通訊健康測試...")
+        send_signal_message("🚀 Signal 穿透測試：通訊完美對接！目前 28hse 網頁無新盤變動。")
