@@ -29,16 +29,9 @@ jobs:
           SIGNAL_URL: ${{ secrets.SIGNAL_URL }}
           SIGNAL_API_KEY: ${{ secrets.SIGNAL_API_KEY }}
         run: python app.py
-
-      - name: Commit and push changes
+       - name: Run script
+        env:
+          KV_URL: ${{ secrets.KV_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
-          # 檢查是否有新看過的樓盤需要存入帳本
-          if [ -f processed_ids.txt ] && git status --porcelain | grep -q "processed_ids.txt"; then
-            git add processed_ids.txt
-            git commit -m "🤖 自動更新已處理樓盤帳本 [skip ci]"
-            git push origin main
-          else
-            echo "沒有新樓盤，帳本無需更新。"
-          fi
+          python app.py
