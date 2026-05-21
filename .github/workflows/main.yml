@@ -10,7 +10,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           persist-credentials: true
 
@@ -21,11 +22,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pyyaml beautifulsoup4
+          pip install requests beautifulsoup4
 
       - name: Run crawler
         env:
-          KV_URL: ${{ secrets.KV_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TEST_FAKE_LISTING: "1"
         run: |
           python app.py
