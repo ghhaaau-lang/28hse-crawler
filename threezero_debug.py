@@ -1,15 +1,15 @@
+import os
 import re
+import json
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
-BASE = "https://www.threezero.com.hk"
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+LOCAL_PROCESSED_FILE = "processed_threezero_ids.json"
 
-URLS = [
-    "https://www.threezero.com.hk/",
-    "https://www.threezero.com.hk/search",
-    "https://www.threezero.com.hk/rent",
-]
+BASE = "https://www.threezero.com.hk"
+START_URL = "https://www.threezero.com.hk/"
 
 
 def get_headers():
@@ -27,159 +27,191 @@ def get_headers():
     }
 
 
-def find_candidates(html, page_url):
+def clean_text(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def load_processed_ids():
+    if os.path.exists(LOCAL_PROCESSED_FILE):
+        try:
+            with open(LOCAL_PROCESSED_FILE, "r", encoding="utf-8") as f:
+                ids = json.load(f).get("ids", [])
+                print(f"✅ 已讀取 {LOCAL_PROCESSED_FILE}：{len(ids)} 筆")
+                return set(ids)
+        except Exception as e:
+            print(f"⚠️ 讀取 {LOCAL_PROCESSED_FILE} 失敗：{e}")
+
+    print(f"ℹ️ 尚無 {LOCAL_PROCESSED_FILE}，將視為第一次執行")
+    return set()
+
+
+def save_processed_ids(processed_ids):
+    try:
+        with open(LOCAL_PROCESSED_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {"ids": sorted(list(processed_ids))},
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+        print(f"✅ 已保存 {LOCAL_PROCESSED_FILE}：{len(processed_ids)} 筆")
+    except Exception as e:
+        print(f"❌ 保存 {LOCAL_PROCESSED_FILE} 失敗：{e}")
+
+
+def send_discord_message(message_text):
+    if not DISCORD_WEBHOOK_URL:
+        print("❌ 找不到 DISCORD_WEBHOOK_URL，請檢查 GitHub Secrets")
+        return False
+
+    chunks = []
+    text = message_text.strip()
+
+    while len(text) > 1800:
+        cut = text.rfind("\n", 0, 1800)
+        if cut == -1:
+            cut = 1800
+        chunks.append(text[:cut])
+        text = text[cut:].strip()
+
+    if text:
+        chunks.append(text)
+
+    success_count = 0
+
+    for index, chunk in enumerate(chunks, 1):
+        try:
+            response = requests.post(
+                DISCORD_WEBHOOK_URL,
+                json={"content": chunk},
+                timeout=15
+            )
+
+            if response.status_code in [200, 204]:
+                print(f"✨ [Discord] 第 {index}/{len(chunks)} 段訊息發送成功")
+                success_count += 1
+            else:
+                print(f"❌ [Discord] 發送失敗：{response.status_code}")
+                print(response.text[:500])
+
+        except Exception as e:
+            print(f"❌ [Discord] 連線失敗：{e}")
+
+    return success_count == len(chunks)
+
+
+def parse_threezero_listings(html, page_url):
     soup = BeautifulSoup(html, "html.parser")
-
-    print("\n========== HTML 基本檢查 ==========")
-    print(f"HTML 長度：{len(html)}")
-
-    text_lower = html.lower()
-
-    for word in [
-        "cloudflare",
-        "captcha",
-        "403",
-        "forbidden",
-        "rent",
-        "property",
-        "singleproperty",
-        "api",
-        "json",
-        "登入",
-        "會員",
-        "業主",
-        "免佣",
-        "whatsapp",
-        "電話",
-    ]:
-        print(f"{word}: {text_lower.count(word.lower())}")
-
-    print("\n========== script src ==========")
-    scripts = soup.find_all("script", src=True)
-    print(f"script 數量：{len(scripts)}")
-
-    for i, s in enumerate(scripts[:100], 1):
-        src = urljoin(page_url, s.get("src", ""))
-        print(f"script {i}: {src}")
-
-    print("\n========== 可疑 href ==========")
     links = soup.find_all("a", href=True)
-    print(f"a[href] 數量：{len(links)}")
 
-    matched = []
+    print(f"🔗 threezero a[href] 數量：{len(links)}")
+
+    listings = {}
 
     for a in links:
         href = a.get("href", "")
-        text = a.get_text(" ", strip=True)
-        full = urljoin(page_url, href)
+        full_link = urljoin(page_url, href)
+        text = clean_text(a.get_text(" ", strip=True))
 
-        if any(k in full.lower() for k in [
-            "rent",
-            "property",
-            "singleproperty",
-            "flat",
-            "house",
-            "apartment",
-        ]):
-            matched.append((full, text))
+        if "/singleproperty/" not in full_link:
+            continue
 
-    print(f"可疑 href 數量：{len(matched)}")
+        # 排除外站或不相關
+        if "threezero.com.hk" not in full_link:
+            continue
 
-    for i, (href, text) in enumerate(matched[:150], 1):
-        print(f"href {i}: {href} | text={text[:100]}")
+        # 用 URL slug 當 ID
+        slug = full_link.rstrip("/").split("/singleproperty/")[-1]
+        if not slug:
+            continue
 
-    print("\n========== 可疑 API / endpoint ==========")
+        house_id = f"threezero_{slug}"
 
-    patterns = [
-        r'["\'](https?://[^"\']+)["\']',
-        r'["\'](/[^"\']*(?:api|ajax|search|property|listing|rent|estate|singleproperty)[^"\']*)["\']',
-        r'url\s*:\s*["\']([^"\']+)["\']',
-        r'fetch\(\s*["\']([^"\']+)["\']',
-        r'\$\.get\(\s*["\']([^"\']+)["\']',
-        r'\$\.post\(\s*["\']([^"\']+)["\']',
-    ]
+        # 標題與描述通常在 a text 裡
+        title = text or "threezero 租盤"
 
-    found = set()
+        # 過濾太短或無意義
+        if len(title) < 3:
+            title = "threezero 租盤"
 
-    for pattern in patterns:
-        for m in re.findall(pattern, html, re.IGNORECASE | re.DOTALL):
-            if isinstance(m, tuple):
-                m = m[0]
+        listings[house_id] = {
+            "id": house_id,
+            "title": f"[threezero免佣] {title[:120]}",
+            "link": full_link,
+        }
 
-            m = m.strip()
+    final = list(listings.values())
 
-            if len(m) > 250:
-                continue
+    print(f"✅ threezero 解析到租盤：{len(final)} 筆")
 
-            if any(k in m.lower() for k in [
-                "api",
-                "ajax",
-                "search",
-                "property",
-                "listing",
-                "rent",
-                "estate",
-                "singleproperty",
-            ]):
-                found.add(urljoin(page_url, m))
+    for i, item in enumerate(final[:10], 1):
+        print(f"sample {i}: {item['title']} | {item['link']}")
 
-    print(f"可疑 endpoint 數量：{len(found)}")
-
-    for i, item in enumerate(sorted(found)[:150], 1):
-        print(f"candidate {i}: {item}")
-
-    print("\n========== 可能電話 / WhatsApp ==========")
-
-    phone_patterns = [
-        r"(?:\+852\s*)?[569]\d{3}\s*\d{4}",
-        r"(?:\+852\s*)?[569]\d{7}",
-        r"wa\.me/\d+",
-        r"api\.whatsapp\.com/send\?phone=\d+",
-    ]
-
-    phones = set()
-
-    for pattern in phone_patterns:
-        for m in re.findall(pattern, html, re.IGNORECASE):
-            phones.add(m)
-
-    print(f"電話 / WhatsApp 疑似數量：{len(phones)}")
-
-    for i, phone in enumerate(sorted(phones)[:80], 1):
-        print(f"phone {i}: {phone}")
+    return final
 
 
-def test_threezero():
-    print("🚀 threezero Debug started")
+def crawl_threezero():
+    print("🚀 threezero 正式版 started")
 
     session = requests.Session()
     headers = get_headers()
 
-    for url in URLS:
-        print("\n\n==============================")
-        print(f"測試 URL：{url}")
-        print("==============================")
+    try:
+        response = session.get(START_URL, headers=headers, timeout=20)
 
-        try:
-            response = session.get(url, headers=headers, timeout=20)
+        print(f"🔎 threezero 狀態碼：{response.status_code}")
+        print(f"📄 HTML 長度：{len(response.text)}")
+        print(f"Final URL：{response.url}")
 
-            print(f"狀態碼：{response.status_code}")
-            print(f"Final URL：{response.url}")
-            print(f"Content-Type：{response.headers.get('content-type')}")
-            print(f"回應長度：{len(response.text)}")
-            print("回應前 500 字：")
-            print(response.text[:500].replace("\n", " ")[:500])
+        if response.status_code != 200:
+            print(response.text[:1000])
+            return []
 
-            if response.status_code == 200:
-                find_candidates(response.text, response.url)
-            else:
-                print("⚠️ 非 200，可能被擋或網址不對。")
+        return parse_threezero_listings(response.text, response.url)
 
-        except Exception as e:
-            print(f"❌ 請求失敗：{e}")
-
-    print("\n✅ threezero Debug finished")
+    except Exception as e:
+        print(f"❌ threezero 抓取失敗：{e}")
+        return []
 
 
 if __name__ == "__main__":
-    test_threezero()
+    print("🚀 threezero Crawler started")
+
+    if DISCORD_WEBHOOK_URL:
+        print("✅ DISCORD_WEBHOOK_URL 已讀取")
+    else:
+        print("❌ DISCORD_WEBHOOK_URL 未讀取")
+
+    processed_ids = load_processed_ids()
+
+    all_listings = crawl_threezero()
+
+    print(f"📦 總共抓到 threezero 租盤：{len(all_listings)} 筆")
+
+    new_listings = [
+        item for item in all_listings
+        if item["id"] not in processed_ids
+    ]
+
+    print(f"🆕 threezero 新租盤：{len(new_listings)} 筆")
+
+    if new_listings:
+        msg = f"🏠 **【threezero 免佣租盤通知】新發現 {len(new_listings)} 筆**\n"
+        msg += "-------------------------\n"
+
+        for i, house in enumerate(new_listings, 1):
+            msg += f"**{i}. {house['title']}**\n"
+            msg += f"🔗 詳情：{house['link']}\n"
+            msg += "-------------------------\n"
+            processed_ids.add(house["id"])
+
+        ok = send_discord_message(msg)
+
+        if ok:
+            save_processed_ids(processed_ids)
+            print(f"🎉 成功推送 {len(new_listings)} 筆 threezero 租盤至 Discord")
+        else:
+            print("⚠️ Discord 發送失敗，暫不保存 processed ids")
+
+    else:
+        print("沒有新的 threezero 租盤更新。")
