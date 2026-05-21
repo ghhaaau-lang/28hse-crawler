@@ -1,4 +1,4 @@
-name: 28hse Signal Crawler
+name: 28hse Discord Crawler
 
 on:
   schedule:
@@ -8,10 +8,11 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: true  # 授權允許把帳本回寫到 GitHub
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -22,14 +23,7 @@ jobs:
         run: |
           pip install requests pyyaml beautifulsoup4
 
-      - name: Run crawler with Signal
-        env:
-          SIGNAL_PHONE: ${{ secrets.SIGNAL_PHONE }}
-          SIGNAL_RECIPIENT: ${{ secrets.SIGNAL_RECIPIENT }}
-          SIGNAL_URL: ${{ secrets.SIGNAL_URL }}
-          SIGNAL_API_KEY: ${{ secrets.SIGNAL_API_KEY }}
-        run: python app.py
-       - name: Run script
+      - name: Run crawler
         env:
           KV_URL: ${{ secrets.KV_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
