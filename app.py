@@ -4,22 +4,31 @@ import json
 import re
 from bs4 import BeautifulSoup
 
+HISTORY_FILE = "processed_ids.txt"
+
+def load_processed_ids():
+    """讀取已經發送過的樓盤 ID 帳本"""
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return set(line.strip() for line in f if line.strip())
+    return set()
+
+def save_processed_ids(processed_ids):
+    """把新的樓盤 ID 寫入帳本"""
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        for pid in sorted(processed_ids):
+            f.write(f"{pid}\n")
+
 def send_signal_message(message_text):
-    """
-    透過 ngrok 內網穿透，將訊息發送回本機 Docker 的 Signal 機器人
-    """
-    # 自動從 GitHub Actions 環境變數讀取外網網址與密碼鎖
+    """透過 ngrok 內網穿透發送 Signal 訊息"""
     NGROK_URL = os.environ.get("SIGNAL_URL")
     API_KEY = os.environ.get("SIGNAL_API_KEY")
     
-    # 確保網址格式正確
-    if NGROK_URL:
-        url = f"{NGROK_URL.rstrip('/')}/v2/send"
-    else:
-        print("❌ [Signal 錯誤] 找不到 SIGNAL_URL 環境變數，請檢查 GitHub Secrets 設定。")
+    if not NGROK_URL:
+        print("❌ [Signal 錯誤] 找不到 SIGNAL_URL 環境變數。")
         return
 
-    # 安全驗證頭：帶著這把鑰匙，家裡的 Docker 才會放行
+    url = f"{NGROK_URL.rstrip('/')}/v2/send"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {API_KEY}"
@@ -27,27 +36,23 @@ def send_signal_message(message_text):
     
     payload = {
         "message": message_text,
-        "number": "+85292906723",       # 綁定成功的香港主號
-        "recipients": ["+85292906723"]  # 接收通知的手機號碼
+        "number": "+85292906723",
+        "recipients": ["+85292906723"]
     }
     
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=15)
         if response.status_code in [200, 201, 204]:
-            print("✨ [Signal] 透過本機 Docker 穿透發送成功！")
+            print("✨ [Signal] 訊息穿透發送成功！")
         else:
-            print(f"❌ [Signal] 發送失敗，狀態碼: {response.status_code}, 回應: {response.text}")
+            print(f"❌ [Signal] 發送失敗，狀態碼: {response.status_code}")
     except Exception as e:
-        print(f"❌ [Signal] 連線到本機 Docker 失敗，請確認電腦 ngrok 是否在運行。錯誤原因: {str(e)}")
+        print(f"❌ [Signal] 連線失敗: {str(e)}")
 
 
 def crawl_28hse():
-    """
-    28hse 業主自讓盤爬蟲主程式
-    """
+    """28hse 業主自讓盤爬蟲"""
     print("🔍 開始爬取 28hse 最新業主盤...")
-    
-    # 28hse 住宅租盤/買盤的業主自讓過濾網址
     url = "https://www.28hse.com/rent/residential/owner"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -57,15 +62,13 @@ def crawl_28hse():
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             print(f"❌ 爬取失敗，網頁狀態碼: {response.status_code}")
-            return None
+            return []
             
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 抓取樓盤列表（根據 28hse 最新網頁結構定位）
         items = soup.find_all('div', class_='property_item')
         
-        new_listings = []
-        for item in items[:5]:  # 每次只取最新的前 5 筆，避免資訊爆炸
+        listings = []
+        for item in items:
             try:
                 title_el = item.find('a', class_='title')
                 price_el = item.find('div', class_='price')
@@ -75,44 +78,57 @@ def crawl_28hse():
                     link = title_el['href']
                     if not link.startswith('http'):
                         link = f"https://www.28hse.com{link}"
-                        
+                    
+                    # 從網址中提取獨一無二的樓盤 ID (例如 item-2345678)
+                    id_match = re.search(r'item-(\d+)', link)
+                    house_id = id_match.group(1) if id_match else link
+                    
                     price = price_el.text.strip() if price_el else "面議"
                     
-                    new_listings.append({
+                    listings.append({
+                        "id": house_id,
                         "title": title,
                         "price": price,
                         "link": link
                     })
-            except Exception as e:
+            except Exception:
                 continue
                 
-        return new_listings
+        return listings
     except Exception as e:
-        print(f"❌ 爬蟲執行期間發生錯誤: {str(e)}")
-        return None
+        print(f"❌ 爬蟲出錯: {str(e)}")
+        return []
 
 
-# 🎯 主程式執行入口
 if __name__ == '__main__':
-    # 執行爬蟲
-    listings = crawl_28hse()
+    # 1. 載入舊帳本
+    processed_ids = load_processed_ids()
     
-    if listings:
-        print(f"🎉 成功抓取到 {len(listings)} 筆最新樓盤！正在發送通知...")
+    # 2. 爬取最新樓盤
+    all_listings = crawl_28hse()
+    
+    # 3. 🧠 核心比對：過濾出「帳本裡沒有」的全新樓盤
+    new_listings = [h for h in all_listings if h['id'] not in processed_ids]
+    
+    if new_listings:
+        print(f"🎉 發現 {len(new_listings)} 個全新未看過的業主盤！正在發送通知...")
         
-        # 組合要發送到手機的訊息內容
-        msg_content = "🏠 【28hse 最新業主盤通知】\n"
+        msg_content = f"🏠 【28hse 最新業主盤通知】(新發現 {len(new_listings)} 筆)\n"
         msg_content += "-------------------------\n"
         
-        for i, house in enumerate(listings, 1):
+        for i, house in enumerate(new_listings, 1):
             msg_content += f"{i}. {house['title']}\n"
             msg_content += f"💰 價格: {house['price']}\n"
             msg_content += f"🔗 詳情: {house['link']}\n"
             msg_content += "-------------------------\n"
             
-        # 🎯 真正呼叫發送功能，把資料推回你家電腦 Docker 噴射到手機
+            # 將新樓盤 ID 紀錄到記憶體中
+            processed_ids.add(house['id'])
+            
+        # 發送精準通知
         send_signal_message(msg_content)
+        
+        # 4. 寫回帳本存檔
+        save_processed_ids(processed_ids)
     else:
-        # 💡 防呆保險：如果網頁剛好沒更新，我們依然發送一條健康檢查，確保通訊正常
-        print("暫無新樓盤更新，發送通訊健康測試...")
-        send_signal_message("🚀 Signal 穿透測試：通訊完美對接！目前 28hse 網頁無新盤變動。")
+        print("查無新樓盤更新，本次不發送 Signal 通知（保持安靜）。")
