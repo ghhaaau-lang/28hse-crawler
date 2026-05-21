@@ -5,7 +5,23 @@ from bs4 import BeautifulSoup
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 
-def crawl_28hse_debug():
+
+def print_context(html, keyword, limit=10, window=220):
+    print(f"\n========== 關鍵字前後文：{keyword} ==========")
+
+    matches = list(re.finditer(keyword, html, re.IGNORECASE))
+    print(f"找到 {len(matches)} 次")
+
+    for i, m in enumerate(matches[:limit], 1):
+        start = max(0, m.start() - window)
+        end = min(len(html), m.end() + window)
+        snippet = html[start:end]
+        snippet = re.sub(r"\s+", " ", snippet)
+        print(f"\n--- {keyword} context {i} ---")
+        print(snippet)
+
+
+def debug_28hse_deeper():
     url = "https://www.28hse.com/rent/apartment?owner_type=1"
 
     headers = {
@@ -23,96 +39,106 @@ def crawl_28hse_debug():
 
     res = requests.get(url, headers=headers, timeout=20)
 
-    print(f"🔎 28hse 狀態碼：{res.status_code}")
+    print("🚀 28hse Deep Debug started")
+    print(f"🔎 狀態碼：{res.status_code}")
     print(f"📄 HTML 長度：{len(res.text)}")
 
     html = res.text
     soup = BeautifulSoup(html, "html.parser")
 
-    print("\n========== 1. 檢查 script src ==========")
-    scripts = soup.find_all("script", src=True)
-    print(f"📜 script 數量：{len(scripts)}")
+    print("\n========== 1. Forms ==========")
+    forms = soup.find_all("form")
+    print(f"form 數量：{len(forms)}")
 
-    for i, s in enumerate(scripts[:80], 1):
-        src = s.get("src", "")
-        if src.startswith("//"):
-            src = "https:" + src
-        elif src.startswith("/"):
-            src = "https://www.28hse.com" + src
+    for i, form in enumerate(forms[:30], 1):
+        action = form.get("action", "")
+        method = form.get("method", "")
+        print(f"form {i}: method={method}, action={action}")
 
-        print(f"script {i}: {src}")
+        inputs = form.find_all(["input", "select", "textarea"])
+        for inp in inputs[:40]:
+            name = inp.get("name", "")
+            value = inp.get("value", "")
+            input_type = inp.get("type", "")
+            print(f"  - {input_type} name={name} value={value}")
 
-    print("\n========== 2. 搜尋 HTML 內可疑 API 字眼 ==========")
-    keywords = [
-        "api",
-        "search",
-        "listing",
-        "property",
-        "rent",
-        "estate",
-        "owner",
-        "__NEXT_DATA__",
-        "apollo",
-        "graphql",
-        "nuxt",
-        "json",
-        "pageProps",
-        "initialState",
-    ]
+    print("\n========== 2. Meta / JSON-LD ==========")
+    scripts = soup.find_all("script")
 
-    lower_html = html.lower()
+    json_like_count = 0
 
-    for kw in keywords:
-        count = lower_html.count(kw.lower())
-        print(f"{kw}: {count}")
+    for i, script in enumerate(scripts, 1):
+        script_type = script.get("type", "")
+        text = script.get_text(" ", strip=True)
 
-    print("\n========== 3. 搜尋可能的 API URL ==========")
+        if "json" in script_type.lower() or "application/ld+json" in script_type.lower():
+            json_like_count += 1
+            print(f"\nJSON script {json_like_count}, type={script_type}")
+            print(text[:1500])
+
+    if json_like_count == 0:
+        print("沒有找到 JSON-LD / JSON script")
+
+    print("\n========== 3. 搜尋疑似 endpoint ==========")
+
     patterns = [
-        r'https?://[^"\']+/api/[^"\']+',
-        r'https?://[^"\']+/[^"\']*api[^"\']*',
-        r'"/api/[^"\']+',
-        r"'/api/[^'\"]+",
-        r'https?://[^"\']+\.json[^"\']*',
-        r'/_next/data/[^"\']+',
-        r'__NEXT_DATA__',
+        r'https?://[^"\']+',
+        r'["\'](/[^"\']*api[^"\']*)["\']',
+        r'["\']([^"\']*ajax[^"\']*)["\']',
+        r'["\']([^"\']*search[^"\']*)["\']',
+        r'["\']([^"\']*property[^"\']*)["\']',
+        r'["\']([^"\']*listing[^"\']*)["\']',
+        r'["\']([^"\']*rent[^"\']*)["\']',
     ]
 
     found = set()
 
     for pattern in patterns:
-        for m in re.findall(pattern, html):
+        for m in re.findall(pattern, html, re.IGNORECASE):
+            if isinstance(m, tuple):
+                m = m[0]
             found.add(m)
 
-    print(f"🔗 找到可疑 URL / pattern：{len(found)} 條")
+    filtered = []
 
-    for i, item in enumerate(sorted(found)[:120], 1):
-        print(f"candidate {i}: {item}")
+    for x in found:
+        lx = x.lower()
+        if any(k in lx for k in ["api", "ajax", "search", "property", "listing", "rent", "estate"]):
+            filtered.append(x)
 
-    print("\n========== 4. 搜尋含 rent / property / apartment 的 href ==========")
-    links = soup.find_all("a", href=True)
+    print(f"可疑 endpoint / link：{len(filtered)} 條")
 
-    matched_links = []
+    for i, x in enumerate(sorted(filtered)[:200], 1):
+        print(f"candidate {i}: {x}")
 
-    for a in links:
-        href = a.get("href", "")
-        if any(x in href.lower() for x in ["rent", "property", "apartment", "estate"]):
-            matched_links.append(href)
+    print_context(html, "api", limit=20)
+    print_context(html, "search", limit=20)
+    print_context(html, "owner_type", limit=20)
+    print_context(html, "property", limit=20)
+    print_context(html, "rent", limit=20)
+    print_context(html, "turnstile", limit=10)
 
-    print(f"🏠 可疑 href 數量：{len(matched_links)}")
+    print("\n========== 4. 檢查是否有 Cloudflare / Bot Check ==========")
 
-    for i, href in enumerate(matched_links[:120], 1):
-        print(f"href {i}: {href}")
+    cf_words = [
+        "turnstile",
+        "cloudflare",
+        "challenge",
+        "captcha",
+        "cf-chl",
+        "cf_clearance",
+    ]
 
-    print("\n========== 5. HTML 前 1000 字 ==========")
-    print(html[:1000])
+    for word in cf_words:
+        print(f"{word}: {html.lower().count(word.lower())}")
+
+    print("\n✅ Deep Debug finished")
 
 
 if __name__ == "__main__":
-    print("🚀 28hse API Debug started")
-
     if DISCORD_WEBHOOK_URL:
         print("✅ DISCORD_WEBHOOK_URL 已讀取")
     else:
-        print("⚠️ DISCORD_WEBHOOK_URL 未讀取，但這版只是 debug，不影響")
+        print("⚠️ DISCORD_WEBHOOK_URL 未讀取，這版只是 debug")
 
-    crawl_28hse_debug()
+    debug_28hse_deeper()
