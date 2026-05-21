@@ -19,12 +19,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests pyyaml
-          wget https://github.com/AsamK/signal-cli/releases/download/v0.12.5/signal-cli-0.12.5.tar.gz
-          tar xf signal-cli-0.12.5.tar.gz
-          sudo mv signal-cli-0.12.5 /opt/signal-cli
 
       - name: Run crawler with Signal
         env:
           SIGNAL_PHONE: ${{ secrets.SIGNAL_PHONE }}
           SIGNAL_RECIPIENT: ${{ secrets.SIGNAL_RECIPIENT }}
+          # 👇 完美對接這兩行，爬蟲正式獲得穿透能力！
+          SIGNAL_URL: ${{ secrets.SIGNAL_URL }}
+          SIGNAL_API_KEY: ${{ secrets.SIGNAL_API_KEY }}
         run: python app.py
