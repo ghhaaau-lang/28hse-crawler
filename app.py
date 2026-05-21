@@ -27,22 +27,24 @@ def save_processed_ids(processed_ids):
     except Exception:
         pass
 
-def send_signal_message(message_text):
-    NGROK_URL = os.environ.get("SIGNAL_URL")
-    API_KEY = os.environ.get("SIGNAL_API_KEY")
-    if not NGROK_URL:
+def send_discord_message(message_text):
+    """🚀 直連 Discord Webhook，一條網址搞定，本機免開機"""
+    WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+    if not WEBHOOK_URL:
+        print("❌ 找不到 DISCORD_WEBHOOK_URL 環境變數")
         return
-    url = f"{NGROK_URL.rstrip('/')}/v2/send"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
+    
     payload = {
-        "message": message_text,
-        "number": "+85292906723",
-        "recipients": ["+85292906723"]
+        "content": message_text
     }
     try:
-        requests.post(url, headers=headers, data=json.dumps(payload), timeout=15)
-    except Exception:
-        pass
+        response = requests.post(WEBHOOK_URL, json=payload, timeout=15)
+        if response.status_code in [200, 204]:
+            print("✨ [Discord] 訊息發送成功！")
+        else:
+            print(f"❌ [Discord] 發送失敗，狀態碼: {response.status_code}")
+    except Exception as e:
+        print(f"❌ [Discord] 連線失敗: {str(e)}")
 
 def crawl_28hse():
     """28hse 業主自讓盤"""
@@ -51,8 +53,7 @@ def crawl_28hse():
     listings = []
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code != 200: 
-            return []
+        if res.status_code != 200: return []
         soup = BeautifulSoup(res.text, 'html.parser')
         items = soup.find_all('a', href=re.compile(r'/rent/apartment/item-\d+'))
         for item in items:
@@ -62,71 +63,55 @@ def crawl_28hse():
                 if not link.startswith('http'): 
                     link = f"https://www.28hse.com{link}"
                 
-                # ✨ 安全修正：把 \d+ 移到外面，完美避開 f-string 反斜線地雷
                 id_match = re.search(r'item-(\d+)', link)
-                if id_match:
-                    house_id = f"28hse_{id_match.group(1)}"
-                else:
-                    house_id = f"28hse_{link}"
-                
+                house_id = f"28hse_{id_match.group(1)}" if id_match else f"28hse_{link}"
                 listings.append({"id": house_id, "title": f"[28hse] {title}", "link": link})
-            except: 
-                continue
-    except: 
-        pass
+            except: continue
+    except: pass
     return listings
 
 def crawl_house730():
-    """House730 業主自讓盤 (o1代表業主盤)"""
+    """House730 業主自讓盤"""
     url = "https://www.house730.com/rent/o1/"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     listings = []
     try:
         res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code != 200: 
-            return []
+        if res.status_code != 200: return []
         soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 尋找 House730 的房源卡片連結
         items = soup.find_all('a', href=re.compile(r'/rent-property-\d+/'))
         for item in items:
             try:
                 title_el = item.find('div', class_='title') or item.find('h3')
                 title = title_el.text.strip() if title_el else "精選業主自讓盤"
-                
                 link = item['href']
                 if not link.startswith('http'): 
                     link = f"https://www.house730.com{link}"
                 
-                # ✨ 安全修正：一樣把 House730 的 \d+ 提取拿到大括號外面
                 id_match = re.search(r'property-(\d+)', link)
-                if id_match:
-                    house_id = f"730_{id_match.group(1)}"
-                else:
-                    house_id = f"730_{link}"
+                house_id = f"730_{id_match.group(1)}" if id_match else f"730_{link}"
                 
                 if not any(x['id'] == house_id for x in listings):
                     listings.append({"id": house_id, "title": f"[House730] {title}", "link": link})
-            except: 
-                continue
-    except: 
-        pass
+            except: continue
+    except: pass
     return listings
 
 if __name__ == '__main__':
     processed_ids = load_processed_ids()
     
-    # 同時開火雙源聯防！
     all_listings = crawl_28hse() + crawl_house730()
     new_listings = [h for h in all_listings if h['id'] not in processed_ids]
     
     if new_listings:
-        msg_content = f"🏠 【最新業主盤雙源聯防】(新發現 {len(new_listings)} 筆)\n-------------------------\n"
+        # 使用 Discord 粗體語法 **...** 讓手機排版更清晰
+        msg_content = f"🏠 **【最新業主盤雙源聯防】(新發現 {len(new_listings)} 筆)**\n-------------------------\n"
         for i, house in enumerate(new_listings, 1):
-            msg_content += f"{i}. {house['title']}\n🔗 詳情: {house['link']}\n-------------------------\n"
+            msg_content += f"**{i}. {house['title']}**\n🔗 詳情: {house['link']}\n-------------------------\n"
             processed_ids.add(house['id'])
-        send_signal_message(msg_content)
+        
+        send_discord_message(msg_content)
         save_processed_ids(processed_ids)
-        print(f"🎉 成功推送 {len(new_listings)} 筆全新雙源資料！")
+        print(f"🎉 成功推送 {len(new_listings)} 筆全新雙源資料至 Discord！")
     else:
         print("雙源均無新樓盤更新。")
