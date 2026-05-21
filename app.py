@@ -1,30 +1,113 @@
 import os
 import re
+import json
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
+LOCAL_PROCESSED_FILE = "processed_ids.json"
 
 
-def print_context(html, keyword, limit=10, window=220):
-    print(f"\n========== 關鍵字前後文：{keyword} ==========")
+def send_discord_message(message_text):
+    if not DISCORD_WEBHOOK_URL:
+        print("❌ 找不到 DISCORD_WEBHOOK_URL")
+        return False
 
-    matches = list(re.finditer(keyword, html, re.IGNORECASE))
-    print(f"找到 {len(matches)} 次")
+    try:
+        response = requests.post(
+            DISCORD_WEBHOOK_URL,
+            json={"content": message_text},
+            timeout=15
+        )
 
-    for i, m in enumerate(matches[:limit], 1):
-        start = max(0, m.start() - window)
-        end = min(len(html), m.end() + window)
-        snippet = html[start:end]
-        snippet = re.sub(r"\s+", " ", snippet)
-        print(f"\n--- {keyword} context {i} ---")
-        print(snippet)
+        if response.status_code in [200, 204]:
+            print("✨ [Discord] 訊息發送成功")
+            return True
+
+        print(f"❌ [Discord] 發送失敗：{response.status_code}")
+        print(response.text[:500])
+        return False
+
+    except Exception as e:
+        print(f"❌ [Discord] 連線失敗：{e}")
+        return False
 
 
-def debug_28hse_deeper():
-    url = "https://www.28hse.com/rent/apartment?owner_type=1"
+def load_processed_ids():
+    if os.path.exists(LOCAL_PROCESSED_FILE):
+        try:
+            with open(LOCAL_PROCESSED_FILE, "r", encoding="utf-8") as f:
+                ids = json.load(f).get("ids", [])
+                print(f"✅ 已讀取 processed_ids：{len(ids)} 筆")
+                return set(ids)
+        except Exception as e:
+            print(f"⚠️ processed_ids.json 讀取失敗：{e}")
 
-    headers = {
+    print("ℹ️ 尚無 processed_ids 記錄")
+    return set()
+
+
+def save_processed_ids(processed_ids):
+    try:
+        with open(LOCAL_PROCESSED_FILE, "w", encoding="utf-8") as f:
+            json.dump({"ids": sorted(list(processed_ids))}, f, ensure_ascii=False, indent=2)
+        print(f"✅ 已保存 processed_ids：{len(processed_ids)} 筆")
+    except Exception as e:
+        print(f"❌ processed_ids.json 保存失敗：{e}")
+
+
+def extract_item_links(html):
+    links = set()
+
+    patterns = [
+        r"https?://www\.28hse\.com/rent/apartment/item-\d+[^\"'<\s]*",
+        r"/rent/apartment/item-\d+[^\"'<\s]*",
+        r"rent/apartment/item-\d+[^\"'<\s]*",
+        r"item-\d+",
+    ]
+
+    for pattern in patterns:
+        for match in re.findall(pattern, html):
+            match = match.replace("\\/", "/")
+
+            if match.startswith("http"):
+                link = match
+            elif match.startswith("/"):
+                link = "https://www.28hse.com" + match
+            elif match.startswith("rent/"):
+                link = "https://www.28hse.com/" + match
+            elif match.startswith("item-"):
+                link = "https://www.28hse.com/rent/apartment/" + match
+            else:
+                continue
+
+            links.add(link)
+
+    return sorted(links)
+
+
+def parse_listings_from_links(links):
+    listings = []
+
+    for link in links:
+        id_match = re.search(r"item-(\d+)", link)
+        if not id_match:
+            continue
+
+        house_id = f"28hse_{id_match.group(1)}"
+
+        listings.append({
+            "id": house_id,
+            "title": "[28hse] 業主盤",
+            "link": link
+        })
+
+    return listings
+
+
+def get_headers():
+    return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -37,108 +120,141 @@ def debug_28hse_deeper():
         "Pragma": "no-cache",
     }
 
-    res = requests.get(url, headers=headers, timeout=20)
 
-    print("🚀 28hse Deep Debug started")
-    print(f"🔎 狀態碼：{res.status_code}")
-    print(f"📄 HTML 長度：{len(res.text)}")
+def crawl_28hse_form_test():
+    base_url = "https://www.28hse.com/rent/apartment?owner_type=1"
+    session = requests.Session()
+    headers = get_headers()
 
-    html = res.text
-    soup = BeautifulSoup(html, "html.parser")
+    print("🚀 28hse Form Test started")
 
-    print("\n========== 1. Forms ==========")
-    forms = soup.find_all("form")
-    print(f"form 數量：{len(forms)}")
+    try:
+        first = session.get(base_url, headers=headers, timeout=20)
+        print(f"🔎 第一次請求狀態碼：{first.status_code}")
+        print(f"📄 第一次 HTML 長度：{len(first.text)}")
 
-    for i, form in enumerate(forms[:30], 1):
-        action = form.get("action", "")
-        method = form.get("method", "")
-        print(f"form {i}: method={method}, action={action}")
+        if first.status_code != 200:
+            return []
 
-        inputs = form.find_all(["input", "select", "textarea"])
-        for inp in inputs[:40]:
-            name = inp.get("name", "")
-            value = inp.get("value", "")
-            input_type = inp.get("type", "")
-            print(f"  - {input_type} name={name} value={value}")
+        first_links = extract_item_links(first.text)
+        print(f"🏠 第一次直接找到 item link：{len(first_links)} 條")
 
-    print("\n========== 2. Meta / JSON-LD ==========")
-    scripts = soup.find_all("script")
+        if first_links:
+            return parse_listings_from_links(first_links)
 
-    json_like_count = 0
+        soup = BeautifulSoup(first.text, "html.parser")
+        forms = soup.find_all("form")
+        print(f"🧾 form 數量：{len(forms)}")
 
-    for i, script in enumerate(scripts, 1):
-        script_type = script.get("type", "")
-        text = script.get_text(" ", strip=True)
+        test_results = []
 
-        if "json" in script_type.lower() or "application/ld+json" in script_type.lower():
-            json_like_count += 1
-            print(f"\nJSON script {json_like_count}, type={script_type}")
-            print(text[:1500])
+        for form_index, form in enumerate(forms, 1):
+            action = form.get("action") or "/rent/apartment"
+            method = (form.get("method") or "get").lower()
 
-    if json_like_count == 0:
-        print("沒有找到 JSON-LD / JSON script")
+            target_url = urljoin("https://www.28hse.com", action)
 
-    print("\n========== 3. 搜尋疑似 endpoint ==========")
+            params = {}
 
-    patterns = [
-        r'https?://[^"\']+',
-        r'["\'](/[^"\']*api[^"\']*)["\']',
-        r'["\']([^"\']*ajax[^"\']*)["\']',
-        r'["\']([^"\']*search[^"\']*)["\']',
-        r'["\']([^"\']*property[^"\']*)["\']',
-        r'["\']([^"\']*listing[^"\']*)["\']',
-        r'["\']([^"\']*rent[^"\']*)["\']',
-    ]
+            inputs = form.find_all(["input", "select", "textarea"])
 
-    found = set()
+            for inp in inputs:
+                name = inp.get("name")
+                if not name:
+                    continue
 
-    for pattern in patterns:
-        for m in re.findall(pattern, html, re.IGNORECASE):
-            if isinstance(m, tuple):
-                m = m[0]
-            found.add(m)
+                value = inp.get("value", "")
 
-    filtered = []
+                # 保留原本 hidden 值
+                params[name] = value
 
-    for x in found:
-        lx = x.lower()
-        if any(k in lx for k in ["api", "ajax", "search", "property", "listing", "rent", "estate"]):
-            filtered.append(x)
+            # 強制加幾個關鍵參數
+            params["buyRent"] = "rent"
+            params["mobilePageChannel"] = "apartment"
+            params["propertyDoSearchVersion"] = "2.0"
+            params["owner_type"] = "1"
+            params["page"] = "1"
 
-    print(f"可疑 endpoint / link：{len(filtered)} 條")
+            print(f"\n========== 測試 form {form_index} ==========")
+            print(f"method={method}")
+            print(f"target_url={target_url}")
+            print(f"params keys={list(params.keys())[:40]}")
+            print(f"params count={len(params)}")
 
-    for i, x in enumerate(sorted(filtered)[:200], 1):
-        print(f"candidate {i}: {x}")
+            try:
+                if method == "post":
+                    r = session.post(target_url, headers=headers, data=params, timeout=20)
+                else:
+                    r = session.get(target_url, headers=headers, params=params, timeout=20)
 
-    print_context(html, "api", limit=20)
-    print_context(html, "search", limit=20)
-    print_context(html, "owner_type", limit=20)
-    print_context(html, "property", limit=20)
-    print_context(html, "rent", limit=20)
-    print_context(html, "turnstile", limit=10)
+                print(f"form {form_index} 狀態碼：{r.status_code}")
+                print(f"form {form_index} URL：{r.url}")
+                print(f"form {form_index} HTML 長度：{len(r.text)}")
 
-    print("\n========== 4. 檢查是否有 Cloudflare / Bot Check ==========")
+                links = extract_item_links(r.text)
+                print(f"form {form_index} 找到 item link：{len(links)} 條")
 
-    cf_words = [
-        "turnstile",
-        "cloudflare",
-        "challenge",
-        "captcha",
-        "cf-chl",
-        "cf_clearance",
-    ]
+                if links:
+                    test_results.extend(parse_listings_from_links(links))
 
-    for word in cf_words:
-        print(f"{word}: {html.lower().count(word.lower())}")
+                # Debug：看看有沒有 item_ids
+                item_ids_match = re.findall(r'item_ids["\']?\s*[:=]\s*["\']?([^"\'<>\s]+)', r.text)
+                print(f"form {form_index} item_ids 疑似數量：{len(item_ids_match)}")
 
-    print("\n✅ Deep Debug finished")
+                if item_ids_match[:5]:
+                    print(f"item_ids samples：{item_ids_match[:5]}")
+
+            except Exception as e:
+                print(f"⚠️ form {form_index} 測試失敗：{e}")
+
+        # 去重
+        unique = {}
+        for item in test_results:
+            unique[item["id"]] = item
+
+        listings = list(unique.values())
+        print(f"\n✅ 28hse form test 最終整理：{len(listings)} 筆")
+        return listings
+
+    except Exception as e:
+        print(f"❌ 28hse form test 失敗：{e}")
+        return []
 
 
 if __name__ == "__main__":
+    print("🚀 Crawler started")
+
     if DISCORD_WEBHOOK_URL:
         print("✅ DISCORD_WEBHOOK_URL 已讀取")
     else:
-        print("⚠️ DISCORD_WEBHOOK_URL 未讀取，這版只是 debug")
+        print("❌ DISCORD_WEBHOOK_URL 未讀取")
 
-    debug_28hse_deeper()
+    processed_ids = load_processed_ids()
+
+    all_listings = crawl_28hse_form_test()
+
+    print(f"📦 總共抓到：{len(all_listings)} 筆")
+
+    new_listings = [x for x in all_listings if x["id"] not in processed_ids]
+    print(f"🆕 新樓盤：{len(new_listings)} 筆")
+
+    if new_listings:
+        msg = f"🏠 **【28hse 業主盤通知】新發現 {len(new_listings)} 筆**\n"
+        msg += "-------------------------\n"
+
+        for i, house in enumerate(new_listings, 1):
+            msg += f"**{i}. {house['title']}**\n"
+            msg += f"🔗 詳情：{house['link']}\n"
+            msg += "-------------------------\n"
+            processed_ids.add(house["id"])
+
+        ok = send_discord_message(msg)
+
+        if ok:
+            save_processed_ids(processed_ids)
+            print(f"🎉 成功推送 {len(new_listings)} 筆至 Discord")
+        else:
+            print("⚠️ Discord 發送失敗，暫不保存 processed_ids")
+
+    else:
+        print("沒有新樓盤更新。")
