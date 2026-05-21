@@ -4,150 +4,111 @@ import json
 import re
 from bs4 import BeautifulSoup
 
-HISTORY_FILE = "processed_ids.txt"
+# 🎯 雲端大腦：唯讀寫 Redis 資料庫
+KV_URL = os.environ.get("KV_URL")
 
 def load_processed_ids():
-    """讀取已經發送過的樓盤 ID 帳本"""
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            return set(line.strip() for line in f if line.strip())
+    if not KV_URL:
+        return set()
+    try:
+        response = requests.get(f"{KV_URL}/processed_ids", timeout=10)
+        if response.status_code == 200:
+            return set(response.json().get("ids", []))
+    except Exception:
+        pass
     return set()
 
 def save_processed_ids(processed_ids):
-    """把新的樓盤 ID 寫入帳本"""
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        for pid in sorted(processed_ids):
-            f.write(f"{pid}\n")
+    if not KV_URL:
+        return
+    try:
+        payload = {"ids": list(processed_ids)}
+        requests.post(f"{KV_URL}/processed_ids", json=payload, timeout=10)
+    except Exception:
+        pass
 
 def send_signal_message(message_text):
-    """透過 ngrok 內網穿透發送 Signal 訊息"""
     NGROK_URL = os.environ.get("SIGNAL_URL")
     API_KEY = os.environ.get("SIGNAL_API_KEY")
-    
     if not NGROK_URL:
-        print("❌ [Signal 錯誤] 找不到 SIGNAL_URL 環境變數。")
         return
-
     url = f"{NGROK_URL.rstrip('/')}/v2/send"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}"
-    }
-    
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {API_KEY}"}
     payload = {
         "message": message_text,
         "number": "+85292906723",
         "recipients": ["+85292906723"]
     }
-    
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=15)
-        if response.status_code in [200, 201, 204]:
-            print("✨ [Signal] 訊息穿透發送成功！")
-        else:
-            print(f"❌ [Signal] 發送失敗，狀態碼: {response.status_code}")
-    except Exception as e:
-        print(f"❌ [Signal] 連線失敗: {str(e)}")
-
+        requests.post(url, headers=headers, data=json.dumps(payload), timeout=15)
+    except Exception:
+        pass
 
 def crawl_28hse():
-    """28hse 業主自讓盤爬蟲（最新網址與結構校正版）"""
-    print("🔍 開始爬取 28hse 最新業主盤...")
-    
-    # 🎯 這裡替換成你找出來的最新正確網址
+    """28hse 業主自讓盤"""
     url = "https://www.28hse.com/rent/apartment?owner_type=1"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
-    
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    listings = []
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            print(f"❌ 爬取失敗，網頁狀態碼: {response.status_code}")
-            return []
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # 兼容新舊版結構：同時捕捉 property_item 或以 item-開頭的列表中物件
-        items = soup.find_all('div', class_=lambda x: x and ('property_item' in x or 'item' in x))
-        
-        # 如果上面沒抓到，嘗試抓取常見的 a 標籤外層
-        if not items:
-            items = soup.find_all('a', href=re.compile(r'/rent/apartment/item-\d+'))
-            
-        listings = []
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code != 200: return []
+        soup = BeautifulSoup(res.text, 'html.parser')
+        items = soup.find_all('a', href=re.compile(r'/rent/apartment/item-\d+'))
         for item in items:
             try:
-                # 尋找標題與連結
-                title_el = item.find('a', class_='title') if hasattr(item, 'find') else None
-                if not title_el and item.name == 'a':
-                    title_el = item
-                    
-                if title_el:
-                    title = title_el.text.strip()
-                    link = title_el['href']
-                    if not link.startswith('http'):
-                        link = f"https://www.28hse.com{link}"
-                    
-                    # 提取樓盤唯一 ID
-                    id_match = re.search(r'item-(\d+)', link)
-                    house_id = id_match.group(1) if id_match else link
-                    
-                    # 尋找價格
-                    price_el = item.find('div', class_='price') if hasattr(item, 'find') else None
-                    if not price_el and hasattr(item, 'find_next'):
-                        price_el = item.find_next('div', class_='price')
-                        
-                    price = price_el.text.strip() if price_el else "面議"
-                    
-                    # 簡單過濾掉重複抓取的 ID
-                    if not any(h['id'] == house_id for h in listings):
-                        listings.append({
-                            "id": house_id,
-                            "title": title,
-                            "price": price,
-                            "link": link
-                        })
-            except Exception:
-                continue
-                
-        return listings
-    except Exception as e:
-        print(f"❌ 爬蟲出錯: {str(e)}")
-        return []
+                title = item.text.strip().split('\n')[0]
+                link = item['href']
+                if not link.startswith('http'): link = f"https://www.28hse.com{link}"
+                house_id = f"28hse_{re.search(r'item-(\d+)', link).group(1)}"
+                listings.append({"id": house_id, "title": f"[28hse] {title}", "link": link})
+            except: continue
+    except: pass
+    return listings
 
+def crawl_house730():
+    """House730 業主自讓盤 (o1代表業主盤)"""
+    url = "https://www.house730.com/rent/o1/"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    listings = []
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code != 200: return []
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # 尋找 House730 的房源卡片區塊
+        items = soup.find_all('a', href=re.compile(r'/rent-property-\d+/'))
+        for item in items:
+            try:
+                # 撈取標題
+                title_el = item.find('div', class_='title') or item.find('h3')
+                title = title_el.text.strip() if title_el else "精選業主自讓盤"
+                
+                link = item['href']
+                if not link.startswith('http'): link = f"https://www.house730.com{link}"
+                
+                # 提取 House730 唯一的房屋 ID
+                house_id = f"730_{re.search(r'property-(\d+)', link).group(1)}"
+                
+                if not any(x['id'] == house_id for x in listings):
+                    listings.append({"id": house_id, "title": f"[House730] {title}", "link": link})
+            except: continue
+    except: pass
+    return listings
 
 if __name__ == '__main__':
-    # 1. 載入舊帳本
     processed_ids = load_processed_ids()
     
-    # 2. 爬取最新樓盤
-    all_listings = crawl_28hse()
-    
-    # 3. 🧠 核心比對：過濾出「帳本裡沒有」的全新樓盤
+    # 同時開火兩邊撈取
+    all_listings = crawl_28hse() + crawl_house730()
     new_listings = [h for h in all_listings if h['id'] not in processed_ids]
     
     if new_listings:
-        print(f"🎉 發現 {len(new_listings)} 個全新未看過的業主盤！正在發送通知...")
-        
-        msg_content = f"🏠 【28hse 最新業主盤通知】(新發現 {len(new_listings)} 筆)\n"
-        msg_content += "-------------------------\n"
-        
+        msg_content = f"🏠 【最新業主盤雙源聯防】(新發現 {len(new_listings)} 筆)\n-------------------------\n"
         for i, house in enumerate(new_listings, 1):
-            msg_content += f"{i}. {house['title']}\n"
-            msg_content += f"💰 價格: {house['price']}\n"
-            msg_content += f"🔗 詳情: {house['link']}\n"
-            msg_content += "-------------------------\n"
-            
-            # 將新樓盤 ID 紀錄到記憶體中
+            msg_content += f"{i}. {house['title']}\n🔗 詳情: {house['link']}\n-------------------------\n"
             processed_ids.add(house['id'])
-            
-        # 發送精準通知
         send_signal_message(msg_content)
-        
-        # 4. 寫回帳本存檔
         save_processed_ids(processed_ids)
+        print(f"🎉 成功推送 {len(new_listings)} 筆全新聯防資料！")
     else:
-        print("查無新樓盤更新，本次不發送 Signal 通知（保持安靜）。")
+        print("雙源均無新樓盤更新。")
