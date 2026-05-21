@@ -77,152 +77,7 @@ def save_processed_ids(processed_ids):
         print(f"❌ processed_ids.json 保存失敗：{e}")
 
 
-def extract_links_from_text(text):
-    links = set()
-
-    patterns = [
-        r"https?://www\.28hse\.com/rent/apartment/item-\d+[^\"'<\s]*",
-        r"/rent/apartment/item-\d+[^\"'<\s]*",
-        r"rent/apartment/item-\d+[^\"'<\s]*",
-        r"item-\d+",
-    ]
-
-    for pattern in patterns:
-        for match in re.findall(pattern, text):
-            match = match.replace("\\/", "/")
-
-            if match.startswith("http"):
-                link = match
-            elif match.startswith("/"):
-                link = BASE + match
-            elif match.startswith("rent/"):
-                link = BASE + "/" + match
-            elif match.startswith("item-"):
-                link = BASE + "/rent/apartment/" + match
-            else:
-                continue
-
-            links.add(link)
-
-    return sorted(links)
-
-
-def parse_json_for_items(data):
-    """
-    嘗試從 JSON 裡面找 item id / url / title。
-    因為未知格式，先用遞迴掃所有欄位。
-    """
-    results = []
-
-    def walk(obj):
-        if isinstance(obj, dict):
-            # 常見欄位猜測
-            possible_id = (
-                obj.get("id")
-                or obj.get("item_id")
-                or obj.get("itemId")
-                or obj.get("property_id")
-                or obj.get("propertyId")
-            )
-
-            possible_url = (
-                obj.get("url")
-                or obj.get("link")
-                or obj.get("href")
-                or obj.get("detail_url")
-                or obj.get("detailUrl")
-            )
-
-            possible_title = (
-                obj.get("title")
-                or obj.get("name")
-                or obj.get("subject")
-                or obj.get("estate_name")
-                or obj.get("building_name")
-                or obj.get("addr")
-            )
-
-            if possible_id or possible_url:
-                text_blob = json.dumps(obj, ensure_ascii=False)
-
-                id_match = re.search(r"item-(\d+)", text_blob)
-                if id_match:
-                    item_id = id_match.group(1)
-                    link = BASE + f"/rent/apartment/item-{item_id}"
-                    title = possible_title or "28hse 業主盤"
-
-                    results.append({
-                        "id": f"28hse_{item_id}",
-                        "title": f"[28hse] {str(title)[:80]}",
-                        "link": link
-                    })
-
-            for v in obj.values():
-                walk(v)
-
-        elif isinstance(obj, list):
-            for x in obj:
-                walk(x)
-
-    walk(data)
-
-    # 去重
-    unique = {}
-    for item in results:
-        unique[item["id"]] = item
-
-    return list(unique.values())
-
-
-def parse_response_to_listings(response_text):
-    listings = []
-
-    # 1. 先試 JSON
-    try:
-        data = json.loads(response_text)
-        print("✅ 回應可解析為 JSON")
-
-        print("JSON 頂層型態：", type(data).__name__)
-
-        if isinstance(data, dict):
-            print("JSON 頂層 keys：", list(data.keys())[:30])
-
-        json_items = parse_json_for_items(data)
-        print(f"🧩 從 JSON 嘗試解析到：{len(json_items)} 筆")
-        listings.extend(json_items)
-
-    except Exception:
-        print("ℹ️ 回應不是純 JSON，改用 HTML / text 解析")
-
-    # 2. 再用全文 link regex
-    links = extract_links_from_text(response_text)
-    print(f"🔗 從回應文字抓到 item link：{len(links)} 條")
-
-    for link in links:
-        id_match = re.search(r"item-(\d+)", link)
-        if not id_match:
-            continue
-
-        item_id = id_match.group(1)
-
-        listings.append({
-            "id": f"28hse_{item_id}",
-            "title": "[28hse] 業主盤",
-            "link": link
-        })
-
-    # 3. 去重
-    unique = {}
-    for item in listings:
-        unique[item["id"]] = item
-
-    return list(unique.values())
-
-
 def build_params():
-    """
-    從之前 form 抓到的欄位整理出基本查詢參數。
-    """
     return {
         "page": "1",
         "searchText": "",
@@ -275,65 +130,180 @@ def build_params():
     }
 
 
-def test_dosearch():
+def normalize_link(link):
+    if not link:
+        return ""
+
+    link = link.replace("\\/", "/").strip()
+
+    if link.startswith("http"):
+        return link
+
+    if link.startswith("//"):
+        return "https:" + link
+
+    if link.startswith("/"):
+        return BASE + link
+
+    return BASE + "/" + link
+
+
+def parse_result_content_html(html):
+    listings = []
+    soup = BeautifulSoup(html, "html.parser")
+
+    print(f"🧩 resultContentHtml 長度：{len(html)}")
+
+    # 先看 HTML 裡有什麼 href
+    links = soup.find_all("a", href=True)
+    print(f"🔗 resultContentHtml a[href] 數量：{len(links)}")
+
+    sample_count = 0
+    for a in links:
+        href = a.get("href", "")
+        text = a.get_text(" ", strip=True)
+
+        if sample_count < 20:
+            print(f"href sample {sample_count + 1}: {href} | text={text[:80]}")
+            sample_count += 1
+
+        full_link = normalize_link(href)
+
+        # 28hse 可能不是 item-，也可能是 property- / rent/apartment
+        if not any(k in full_link.lower() for k in ["item-", "property", "rent", "apartment"]):
+            continue
+
+        id_match = re.search(r"(?:item-|property-|id=)(\d+)", full_link)
+
+        if id_match:
+            item_id = id_match.group(1)
+        else:
+            # 沒有明確 ID 就用 link 當 ID
+            item_id = re.sub(r"\W+", "_", full_link)[-80:]
+
+        title = text or "28hse 業主盤"
+
+        # 過濾太短或無意義 title
+        if len(title) < 2:
+            title = "28hse 業主盤"
+
+        listings.append({
+            "id": f"28hse_{item_id}",
+            "title": f"[28hse] {title[:90]}",
+            "link": full_link
+        })
+
+    # 備援：全文 regex 找 URL / item
+    regex_patterns = [
+        r"https?://www\.28hse\.com/[^\"'<>\s]+",
+        r"/rent/[^\"'<>\s]+",
+        r"/property/[^\"'<>\s]+",
+        r"item-\d+",
+    ]
+
+    for pattern in regex_patterns:
+        for match in re.findall(pattern, html):
+            link = normalize_link(match)
+            id_match = re.search(r"(?:item-|property-|id=)(\d+)", link)
+
+            if id_match:
+                item_id = id_match.group(1)
+            else:
+                item_id = re.sub(r"\W+", "_", link)[-80:]
+
+            if any(k in link.lower() for k in ["item-", "property", "rent", "apartment"]):
+                listings.append({
+                    "id": f"28hse_{item_id}",
+                    "title": "[28hse] 業主盤",
+                    "link": link
+                })
+
+    # 去重
+    unique = {}
+    for item in listings:
+        unique[item["id"]] = item
+
+    final = list(unique.values())
+    print(f"✅ 從 resultContentHtml 解析到：{len(final)} 筆")
+
+    return final
+
+
+def extract_result_html_from_json(data):
+    paths = [
+        ["data", "results", "resultContentHtml"],
+        ["result", "resultContentHtml"],
+        ["results", "resultContentHtml"],
+        ["data", "resultContentHtml"],
+    ]
+
+    for path in paths:
+        cur = data
+        ok = True
+
+        for key in path:
+            if isinstance(cur, dict) and key in cur:
+                cur = cur[key]
+            else:
+                ok = False
+                break
+
+        if ok and isinstance(cur, str) and cur.strip():
+            print(f"✅ 找到 resultContentHtml path：{'.'.join(path)}")
+            return cur
+
+    print("❌ 找不到 resultContentHtml")
+    return ""
+
+
+def crawl_28hse_dosearch():
     session = requests.Session()
     headers = get_headers()
     params = build_params()
 
-    print("🚀 28hse /property/dosearch Test started")
+    print("🚀 28hse /property/dosearch 正式解析 started")
 
-    # 先打一次搜尋頁，建立 session cookies
-    first = session.get(SEARCH_PAGE, headers={
-        **headers,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }, timeout=20)
+    first = session.get(
+        SEARCH_PAGE,
+        headers={
+            **headers,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        timeout=20
+    )
 
     print(f"🔎 搜尋頁狀態碼：{first.status_code}")
     print(f"📄 搜尋頁 HTML 長度：{len(first.text)}")
     print(f"🍪 cookies 數量：{len(session.cookies)}")
 
-    all_listings = []
+    r = session.get(DOSEARCH_URL, headers=headers, params=params, timeout=20)
 
-    tests = [
-        ("GET params", "get", params),
-        ("POST form", "post", params),
-        ("POST json", "post_json", params),
-    ]
+    print(f"🔎 dosearch 狀態碼：{r.status_code}")
+    print(f"📄 dosearch 回應長度：{len(r.text)}")
+    print(f"Content-Type：{r.headers.get('content-type')}")
 
-    for test_name, method, payload in tests:
-        print(f"\n========== 測試 {test_name} ==========")
+    if r.status_code != 200:
+        print(r.text[:1000])
+        return []
 
-        try:
-            if method == "get":
-                r = session.get(DOSEARCH_URL, headers=headers, params=payload, timeout=20)
-            elif method == "post":
-                r = session.post(DOSEARCH_URL, headers=headers, data=payload, timeout=20)
-            else:
-                r = session.post(DOSEARCH_URL, headers=headers, json=payload, timeout=20)
+    try:
+        data = r.json()
+        print("✅ dosearch 回應可解析為 JSON")
+        print("JSON 頂層 keys：", list(data.keys())[:30])
 
-            print(f"狀態碼：{r.status_code}")
-            print(f"URL：{r.url}")
-            print(f"回應長度：{len(r.text)}")
-            print(f"Content-Type：{r.headers.get('content-type')}")
-            print("回應前 500 字：")
-            print(r.text[:500].replace("\n", " ")[:500])
+        result_html = extract_result_html_from_json(data)
 
-            listings = parse_response_to_listings(r.text)
-            print(f"✅ {test_name} 解析後：{len(listings)} 筆")
+        if not result_html:
+            print("⚠️ 沒拿到 resultContentHtml，印出 JSON 前 1000 字：")
+            print(json.dumps(data, ensure_ascii=False)[:1000])
+            return []
 
-            all_listings.extend(listings)
+        return parse_result_content_html(result_html)
 
-        except Exception as e:
-            print(f"❌ {test_name} 測試失敗：{e}")
-
-    unique = {}
-    for item in all_listings:
-        unique[item["id"]] = item
-
-    final = list(unique.values())
-    print(f"\n🎯 /property/dosearch 最終整理：{len(final)} 筆")
-
-    return final
+    except Exception as e:
+        print(f"❌ JSON 解析失敗：{e}")
+        print(r.text[:1000])
+        return []
 
 
 if __name__ == "__main__":
@@ -346,7 +316,7 @@ if __name__ == "__main__":
 
     processed_ids = load_processed_ids()
 
-    all_listings = test_dosearch()
+    all_listings = crawl_28hse_dosearch()
 
     print(f"📦 總共抓到：{len(all_listings)} 筆")
 
