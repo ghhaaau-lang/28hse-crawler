@@ -1,13 +1,11 @@
 import os
 import requests
-import json
 import re
 from bs4 import BeautifulSoup
 
 # 🎯 雲端大腦：讀寫 Redis / KV 資料庫
 KV_URL = os.environ.get("KV_URL")
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-FORCE_DISCORD_TEST = os.environ.get("FORCE_DISCORD_TEST", "0") == "1"
 
 
 def load_processed_ids():
@@ -52,39 +50,24 @@ def send_discord_message(message_text):
         print("❌ 找不到 DISCORD_WEBHOOK_URL 環境變數")
         return False
 
-    # Discord content 上限約 2000 字，保守切 1800
-    chunks = []
-    text = message_text
+    payload = {
+        "content": message_text
+    }
 
-    while len(text) > 1800:
-        cut = text.rfind("\n", 0, 1800)
-        if cut == -1:
-            cut = 1800
-        chunks.append(text[:cut])
-        text = text[cut:].strip()
+    try:
+        response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
 
-    if text:
-        chunks.append(text)
+        if response.status_code in [200, 204]:
+            print("✨ [Discord] 訊息發送成功！")
+            return True
+        else:
+            print(f"❌ [Discord] 發送失敗，狀態碼: {response.status_code}")
+            print(f"❌ [Discord] 回應內容: {response.text}")
+            return False
 
-    success_count = 0
-
-    for idx, chunk in enumerate(chunks, 1):
-        payload = {"content": chunk}
-
-        try:
-            response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=15)
-
-            if response.status_code in [200, 204]:
-                print(f"✨ [Discord] 第 {idx}/{len(chunks)} 段訊息發送成功！")
-                success_count += 1
-            else:
-                print(f"❌ [Discord] 發送失敗，狀態碼: {response.status_code}")
-                print(f"❌ 回應內容: {response.text}")
-
-        except Exception as e:
-            print(f"❌ [Discord] 連線失敗: {str(e)}")
-
-    return success_count == len(chunks)
+    except Exception as e:
+        print(f"❌ [Discord] 連線失敗: {str(e)}")
+        return False
 
 
 def crawl_28hse():
@@ -195,15 +178,13 @@ if __name__ == "__main__":
     else:
         print("❌ DISCORD_WEBHOOK_URL 未讀取，請檢查 GitHub Secrets")
 
+    # ✅ 測試版：每次執行都會強制發 Discord 測試通知
+    send_discord_message("✅ Discord 測試成功：GitHub Actions 已經成功連到 Webhook")
+
     if KV_URL:
         print("✅ KV_URL 已讀取")
     else:
         print("⚠️ KV_URL 未設定，會影響去重保存")
-
-    # ✅ 強制測試 Discord 通知
-    if FORCE_DISCORD_TEST:
-        send_discord_message("✅ GitHub Actions 測試通知成功，Discord Webhook 已接通")
-        print("🧪 FORCE_DISCORD_TEST=1，測試通知已執行")
 
     processed_ids = load_processed_ids()
 
