@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true  # 授權允許把帳本回寫到 GitHub
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -18,7 +20,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # 👇 這裡補上了 beautifulsoup4，讓雲端認得 bs4 工具包
           pip install requests pyyaml beautifulsoup4
 
       - name: Run crawler with Signal
@@ -28,3 +29,16 @@ jobs:
           SIGNAL_URL: ${{ secrets.SIGNAL_URL }}
           SIGNAL_API_KEY: ${{ secrets.SIGNAL_API_KEY }}
         run: python app.py
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          # 檢查是否有新看過的樓盤需要存入帳本
+          if [ -f processed_ids.txt ] && git status --porcelain | grep -q "processed_ids.txt"; then
+            git add processed_ids.txt
+            git commit -m "🤖 自動更新已處理樓盤帳本 [skip ci]"
+            git push origin main
+          else
+            echo "沒有新樓盤，帳本無需更新。"
+          fi
