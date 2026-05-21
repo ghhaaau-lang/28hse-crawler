@@ -178,8 +178,6 @@ if __name__ == "__main__":
     else:
         print("❌ DISCORD_WEBHOOK_URL 未讀取，請檢查 GitHub Secrets")
 
-    # ✅ 測試版：每次執行都會強制發 Discord 測試通知
-    send_discord_message("✅ Discord 測試成功：GitHub Actions 已經成功連到 Webhook")
 
     if KV_URL:
         print("✅ KV_URL 已讀取")
