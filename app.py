@@ -51,11 +51,15 @@ def send_signal_message(message_text):
 
 
 def crawl_28hse():
-    """28hse 業主自讓盤爬蟲"""
+    """28hse 業主自讓盤爬蟲（最新網址與結構校正版）"""
     print("🔍 開始爬取 28hse 最新業主盤...")
-    url = "https://www.28hse.com/rent/residential/owner"
+    
+    # 🎯 這裡替換成你找出來的最新正確網址
+    url = "https://www.28hse.com/rent/apartment?owner_type=1"
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     }
     
     try:
@@ -65,32 +69,47 @@ def crawl_28hse():
             return []
             
         soup = BeautifulSoup(response.text, 'html.parser')
-        items = soup.find_all('div', class_='property_item')
         
+        # 兼容新舊版結構：同時捕捉 property_item 或以 item-開頭的列表中物件
+        items = soup.find_all('div', class_=lambda x: x and ('property_item' in x or 'item' in x))
+        
+        # 如果上面沒抓到，嘗試抓取常見的 a 標籤外層
+        if not items:
+            items = soup.find_all('a', href=re.compile(r'/rent/apartment/item-\d+'))
+            
         listings = []
         for item in items:
             try:
-                title_el = item.find('a', class_='title')
-                price_el = item.find('div', class_='price')
-                
+                # 尋找標題與連結
+                title_el = item.find('a', class_='title') if hasattr(item, 'find') else None
+                if not title_el and item.name == 'a':
+                    title_el = item
+                    
                 if title_el:
                     title = title_el.text.strip()
                     link = title_el['href']
                     if not link.startswith('http'):
                         link = f"https://www.28hse.com{link}"
                     
-                    # 從網址中提取獨一無二的樓盤 ID (例如 item-2345678)
+                    # 提取樓盤唯一 ID
                     id_match = re.search(r'item-(\d+)', link)
                     house_id = id_match.group(1) if id_match else link
                     
+                    # 尋找價格
+                    price_el = item.find('div', class_='price') if hasattr(item, 'find') else None
+                    if not price_el and hasattr(item, 'find_next'):
+                        price_el = item.find_next('div', class_='price')
+                        
                     price = price_el.text.strip() if price_el else "面議"
                     
-                    listings.append({
-                        "id": house_id,
-                        "title": title,
-                        "price": price,
-                        "link": link
-                    })
+                    # 簡單過濾掉重複抓取的 ID
+                    if not any(h['id'] == house_id for h in listings):
+                        listings.append({
+                            "id": house_id,
+                            "title": title,
+                            "price": price,
+                            "link": link
+                        })
             except Exception:
                 continue
                 
