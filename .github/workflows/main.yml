@@ -27,6 +27,5 @@ jobs:
       - name: Run crawler
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          TEST_FAKE_LISTING: "0"
         run: |
           python app.py
