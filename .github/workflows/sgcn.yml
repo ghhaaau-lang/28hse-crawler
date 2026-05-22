@@ -1,4 +1,4 @@
-name: shichengbbs Debug
+name: SGCN Debug
 
 on:
   workflow_dispatch:
@@ -20,6 +20,6 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      - name: Run shichengbbs debug
+      - name: Run SGCN debug
         run: |
-          python shichengbbs_debug.py
+          python sgcn_app.py
