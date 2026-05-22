@@ -15,14 +15,39 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def normalize_contact_signal(raw):
+    raw = str(raw or "").strip()
+    raw = re.sub(r"\s+", "", raw)
+
+    if not raw:
+        return ""
+
+    digits = re.sub(r"\D", "", raw)
+
+    if digits.startswith("852"):
+        digits = digits[3:]
+
+    # 完整香港電話
+    if re.match(r"^[235679]\d{7}$", digits):
+        return digits
+
+    # 遮罩號碼，例如 +******8634 / ******8634
+    if "*" in raw:
+        tail_match = re.search(r"(\d{3,4})$", raw)
+        if tail_match:
+            return f"尾數{tail_match.group(1)}"
+
+    # ending in 8634
+    if re.match(r"^\d{3,4}$", digits):
+        return f"尾數{digits}"
+
+    return ""
+
+
 def extract_contact_signals(text):
     """
-    抓公開可見的聯絡號碼資訊：
-    - +******8634
-    - ******8634
-    - +852******8634
-    - phone ending in 8634
-    - contact me on whatsapp 92078634
+    只抓 body/input 可見文字，不掃整份 HTML，避免重複。
+    每個尾號只保留一次。
     """
     signals = set()
 
@@ -30,13 +55,8 @@ def extract_contact_signals(text):
         return []
 
     patterns = [
-        # +******8634 / ******8634 / +852******8634
         r"\+?\d{0,3}\s*\*{3,}\s*\d{3,4}",
-
-        # ending in 8634 / ends with 8634
         r"(?:ending in|ends with|尾數|尾号)\s*[:：]?\s*(\d{3,4})",
-
-        # 完整香港電話
         r"(?:\+852\s*)?([235679]\d{3}[\s\-]?\d{4})",
         r"(?:\+852\s*)?([235679]\d{7})",
     ]
@@ -46,30 +66,20 @@ def extract_contact_signals(text):
             if isinstance(match, tuple):
                 match = match[0]
 
-            raw = str(match).strip()
+            signal = normalize_contact_signal(match)
 
-            if not raw:
-                continue
+            if signal:
+                signals.add(signal)
 
-            # 如果是完整電話，整理成 8 位
-            digits = re.sub(r"\D", "", raw)
+    # 如果同時有完整電話和尾數，優先保留完整電話，移除被完整電話覆蓋的尾數
+    full_numbers = [s for s in signals if re.match(r"^[235679]\d{7}$", s)]
+    tails_to_remove = set()
 
-            if digits.startswith("852"):
-                digits = digits[3:]
+    for num in full_numbers:
+        tails_to_remove.add(f"尾數{num[-4:]}")
+        tails_to_remove.add(f"尾數{num[-3:]}")
 
-            if re.match(r"^[235679]\d{7}$", digits):
-                signals.add(digits)
-                continue
-
-            # 如果是尾數，保留 tail 格式
-            if re.match(r"^\d{3,4}$", digits):
-                signals.add(f"尾數{digits}")
-                continue
-
-            # 如果是遮罩號碼，保留原樣但整理空格
-            if "*" in raw:
-                masked = re.sub(r"\s+", "", raw)
-                signals.add(masked)
+    signals = signals - tails_to_remove
 
     return sorted(signals)
 
@@ -186,17 +196,10 @@ def get_listing_links(page):
 
     print(f"🔗 首頁抓到 View listing：{len(final)} 筆")
 
-    for i, item in enumerate(final[:10], 1):
-        print(f"listing sample {i}: {item['title'][:100]} | {item['link']}")
-
     return final
 
 
 def extract_visible_inputs(page):
-    """
-    有些遮罩電話是在 input value 裡，body inner_text 不一定抓得到。
-    所以把 input / textarea value 也抓出來。
-    """
     try:
         values = page.locator("input, textarea").evaluate_all(
             """els => els.map(el => ({
@@ -212,8 +215,6 @@ def extract_visible_inputs(page):
         for item in values:
             chunks.append(item.get("value", ""))
             chunks.append(item.get("placeholder", ""))
-            chunks.append(item.get("name", ""))
-            chunks.append(item.get("id", ""))
 
         return clean_text(" ".join(chunks))
 
@@ -223,7 +224,7 @@ def extract_visible_inputs(page):
 
 
 def crawl_asiaxpat():
-    print("🚀 AsiaXPAT 遮罩電話尾數雷達 started")
+    print("🚀 AsiaXPAT 遮罩電話去重版 started")
 
     results = []
 
@@ -257,11 +258,6 @@ def crawl_asiaxpat():
 
             page.wait_for_timeout(8000)
 
-            body_text = clean_text(page.locator("body").inner_text(timeout=10000))
-
-            print(f"📝 首頁 body text length：{len(body_text)}")
-            print("首頁 view listing:", body_text.lower().count("view listing"))
-
             listings = get_listing_links(page)
 
             for index, item in enumerate(listings, 1):
@@ -291,9 +287,9 @@ def crawl_asiaxpat():
                     )
 
                     input_text = extract_visible_inputs(detail_page)
-                    html_text = detail_page.content()
 
-                    combined_text = f"{list_text} {detail_text} {input_text} {html_text}"
+                    # 重點：不再掃 html_text，避免大量重複尾號
+                    combined_text = f"{list_text} {detail_text} {input_text}"
 
                     signals = extract_contact_signals(combined_text)
 
@@ -301,9 +297,10 @@ def crawl_asiaxpat():
                         print(f"⚠️ 沒看到遮罩/電話：{item['title'][:80]}")
                         continue
 
+                    # 每個 listing 只保留一組去重後 signals
                     contact_text = " / ".join(signals)
 
-                    # 用 listing + contact signal 做去重
+                    # 用 listing ID + contact_text 去重；同尾號同 listing 不會重複
                     contact_key = re.sub(r"\W+", "_", contact_text)
                     notify_id = f"{item['id']}_{contact_key}"
 
@@ -329,7 +326,7 @@ def crawl_asiaxpat():
 
             final = list(unique.values())
 
-            print(f"\n✅ AsiaXPAT 看到遮罩/電話的 listing：{len(final)} 筆")
+            print(f"\n✅ AsiaXPAT 去重後遮罩/電話 listing：{len(final)} 筆")
 
             for i, item in enumerate(final[:10], 1):
                 print(f"contact sample {i}: {item['title']} | {item['contact']} | {item['link']}")
@@ -337,7 +334,7 @@ def crawl_asiaxpat():
             return final
 
         except Exception as e:
-            print(f"❌ AsiaXPAT 遮罩電話版失敗：{e}")
+            print(f"❌ AsiaXPAT 遮罩電話去重版失敗：{e}")
             return []
 
         finally:
