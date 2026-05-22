@@ -1,12 +1,7 @@
-name: SGCN Phone Radar
+name: shichengbbs Debug
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   run:
@@ -15,8 +10,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -27,21 +20,6 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      - name: Run SGCN phone radar
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      - name: Run shichengbbs debug
         run: |
-          python sgcn_app.py
-
-      - name: Commit processed SGCN ids
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          if [ -f processed_sgcn_ids.json ]; then
-            git add processed_sgcn_ids.json
-            git diff --cached --quiet || git commit -m "Update processed SGCN ids"
-            git push
-          else
-            echo "processed_sgcn_ids.json not found, skip commit"
-          fi
+          python shichengbbs_debug.py
