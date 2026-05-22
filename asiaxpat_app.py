@@ -45,10 +45,6 @@ def normalize_contact_signal(raw):
 
 
 def extract_contact_signals(text):
-    """
-    只抓 body/input 可見文字，不掃整份 HTML，避免重複。
-    每個尾號只保留一次。
-    """
     signals = set()
 
     if not text:
@@ -71,7 +67,7 @@ def extract_contact_signals(text):
             if signal:
                 signals.add(signal)
 
-    # 如果同時有完整電話和尾數，優先保留完整電話，移除被完整電話覆蓋的尾數
+    # 如果完整電話存在，就移除相同尾數
     full_numbers = [s for s in signals if re.match(r"^[235679]\d{7}$", s)]
     tails_to_remove = set()
 
@@ -154,77 +150,64 @@ def send_discord_message(message_text):
     return success_count == len(chunks)
 
 
-def get_listing_links(page):
-    links = page.locator("a").evaluate_all(
-        """els => els.map(a => ({
-            text: a.innerText || '',
-            href: a.href || ''
-        }))"""
-    )
-
-    listings = {}
-
-    for item in links:
-        text = clean_text(item.get("text", ""))
-        href = item.get("href", "")
-
-        if not text or not href:
-            continue
-
-        if "View listing" not in text:
-            continue
-
-        if "/classifieds/" not in href:
-            continue
-
-        item_key = re.sub(r"\W+", "_", href)[-140:]
-        item_id = f"asiaxpat_{item_key}"
-
-        title = clean_text(text.replace("View listing", ""))
-
-        if not title:
-            title = "AsiaXPAT classified"
-
-        listings[item_id] = {
-            "id": item_id,
-            "title": f"[AsiaXPAT] {title[:180]}",
-            "link": href,
-            "list_text": text,
-        }
-
-    final = list(listings.values())
-
-    print(f"🔗 首頁抓到 View listing：{len(final)} 筆")
-
-    return final
-
-
-def extract_visible_inputs(page):
+def get_view_listing_count(page):
     try:
-        values = page.locator("input, textarea").evaluate_all(
-            """els => els.map(el => ({
-                value: el.value || '',
-                placeholder: el.placeholder || '',
-                name: el.name || '',
-                id: el.id || ''
-            }))"""
+        return page.get_by_text("View listing", exact=True).count()
+    except Exception:
+        return 0
+
+
+def extract_current_page_result(page, fallback_title, fallback_link):
+    body_text = clean_text(page.locator("body").inner_text(timeout=10000))
+
+    try:
+        input_values = page.locator("input, textarea").evaluate_all(
+            """els => els.map(el => [
+                el.value || '',
+                el.placeholder || '',
+                el.name || '',
+                el.id || ''
+            ].join(' '))"""
         )
+        input_text = clean_text(" ".join(input_values))
+    except Exception:
+        input_text = ""
 
-        chunks = []
+    combined_text = f"{body_text} {input_text}"
 
-        for item in values:
-            chunks.append(item.get("value", ""))
-            chunks.append(item.get("placeholder", ""))
+    signals = extract_contact_signals(combined_text)
 
-        return clean_text(" ".join(chunks))
+    title = page.title() or fallback_title
+    title = clean_text(title)
 
-    except Exception as e:
-        print(f"⚠️ input value 抓取失敗：{e}")
-        return ""
+    if "Just a moment" in title:
+        print("🚫 詳情頁仍是 Cloudflare / Just a moment")
+        return None
+
+    if not signals:
+        print(f"⚠️ 詳情頁沒有看到遮罩/電話：{title[:80]}")
+        return None
+
+    contact_text = " / ".join(signals)
+
+    # 用當前 URL 優先
+    link = page.url or fallback_link
+    item_key = re.sub(r"\W+", "_", link)[-140:]
+    contact_key = re.sub(r"\W+", "_", contact_text)
+    notify_id = f"asiaxpat_{item_key}_{contact_key}"
+
+    print(f"✅ 詳情頁看到聯絡號碼：{contact_text} | {title[:80]}")
+
+    return {
+        "id": notify_id,
+        "title": f"[AsiaXPAT] {title[:180]}",
+        "link": link,
+        "contact": contact_text,
+    }
 
 
 def crawl_asiaxpat():
-    print("🚀 AsiaXPAT 遮罩電話去重版 started")
+    print("🚀 AsiaXPAT 首頁點擊詳情頁版 started")
 
     results = []
 
@@ -258,66 +241,77 @@ def crawl_asiaxpat():
 
             page.wait_for_timeout(8000)
 
-            listings = get_listing_links(page)
+            count = get_view_listing_count(page)
+            print(f"🔗 首頁 View listing 按鈕數量：{count}")
 
-            for index, item in enumerate(listings, 1):
-                link = item["link"]
-                list_text = item["list_text"]
+            if count == 0:
+                text = clean_text(page.locator("body").inner_text(timeout=10000))
+                print("首頁前 1000 字：")
+                print(text[:1000])
+                return []
 
+            max_items = min(count, 20)
+
+            for index in range(max_items):
                 print("\n-------------------------")
-                print(f"🔎 詳情頁 {index}/{len(listings)}")
-                print(f"URL：{link}")
-
-                detail_page = context.new_page()
+                print(f"🔎 點擊詳情 {index + 1}/{max_items}")
 
                 try:
-                    detail_response = detail_page.goto(
-                        link,
-                        wait_until="domcontentloaded",
-                        timeout=60000
-                    )
+                    # 每次回首頁後重新抓 locator，避免 DOM 失效
+                    buttons = page.get_by_text("View listing", exact=True)
 
-                    print(f"詳情頁 status: {detail_response.status if detail_response else 'no response'}")
-                    print(f"詳情頁 title: {detail_page.title()}")
+                    # 取得點擊前附近文字，當 fallback title
+                    fallback_title = "AsiaXPAT classified"
 
-                    detail_page.wait_for_timeout(5000)
+                    try:
+                        parent_text = buttons.nth(index).locator("xpath=ancestor::a[1]").inner_text(timeout=3000)
+                        if parent_text:
+                            fallback_title = clean_text(parent_text.replace("View listing", ""))
+                    except Exception:
+                        pass
 
-                    detail_text = clean_text(
-                        detail_page.locator("body").inner_text(timeout=10000)
-                    )
+                    # 有些 View listing 是 a，有些可能是 button；先抓 href
+                    fallback_link = ""
 
-                    input_text = extract_visible_inputs(detail_page)
+                    try:
+                        href = buttons.nth(index).locator("xpath=ancestor::a[1]").get_attribute("href", timeout=3000)
+                        if href:
+                            if href.startswith("http"):
+                                fallback_link = href
+                            else:
+                                fallback_link = "https://hongkong.asiaxpat.com" + href
+                    except Exception:
+                        pass
 
-                    # 重點：不再掃 html_text，避免大量重複尾號
-                    combined_text = f"{list_text} {detail_text} {input_text}"
+                    buttons.nth(index).scroll_into_view_if_needed(timeout=10000)
+                    page.wait_for_timeout(500)
 
-                    signals = extract_contact_signals(combined_text)
+                    buttons.nth(index).click(timeout=15000)
 
-                    if not signals:
-                        print(f"⚠️ 沒看到遮罩/電話：{item['title'][:80]}")
-                        continue
+                    page.wait_for_load_state("domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(6000)
 
-                    # 每個 listing 只保留一組去重後 signals
-                    contact_text = " / ".join(signals)
+                    print(f"詳情頁 URL：{page.url}")
+                    print(f"詳情頁 title：{page.title()}")
 
-                    # 用 listing ID + contact_text 去重；同尾號同 listing 不會重複
-                    contact_key = re.sub(r"\W+", "_", contact_text)
-                    notify_id = f"{item['id']}_{contact_key}"
+                    result = extract_current_page_result(page, fallback_title, fallback_link)
 
-                    print(f"✅ 看到聯絡號碼標記：{contact_text} | {item['title'][:80]}")
+                    if result:
+                        results.append(result)
 
-                    results.append({
-                        "id": notify_id,
-                        "title": item["title"],
-                        "link": link,
-                        "contact": contact_text,
-                    })
+                    # 回上一頁
+                    page.go_back(wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(4000)
 
                 except Exception as e:
-                    print(f"⚠️ 詳情頁失敗：{e}")
+                    print(f"⚠️ 點擊詳情失敗：{e}")
 
-                finally:
-                    detail_page.close()
+                    # 嘗試回首頁
+                    try:
+                        page.goto(START_URL, wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_timeout(5000)
+                    except Exception:
+                        pass
 
             unique = {}
 
@@ -326,7 +320,7 @@ def crawl_asiaxpat():
 
             final = list(unique.values())
 
-            print(f"\n✅ AsiaXPAT 去重後遮罩/電話 listing：{len(final)} 筆")
+            print(f"\n✅ AsiaXPAT 點擊版找到遮罩/電話 listing：{len(final)} 筆")
 
             for i, item in enumerate(final[:10], 1):
                 print(f"contact sample {i}: {item['title']} | {item['contact']} | {item['link']}")
@@ -334,7 +328,7 @@ def crawl_asiaxpat():
             return final
 
         except Exception as e:
-            print(f"❌ AsiaXPAT 遮罩電話去重版失敗：{e}")
+            print(f"❌ AsiaXPAT 點擊詳情頁版失敗：{e}")
             return []
 
         finally:
@@ -342,7 +336,7 @@ def crawl_asiaxpat():
 
 
 if __name__ == "__main__":
-    print("🚀 AsiaXPAT Masked Contact Radar started")
+    print("🚀 AsiaXPAT Click Contact Radar started")
 
     if DISCORD_WEBHOOK_URL:
         print("✅ DISCORD_WEBHOOK_URL 已讀取")
@@ -361,7 +355,7 @@ if __name__ == "__main__":
     print(f"🆕 AsiaXPAT 新遮罩/電話 listing：{len(new_listings)} 筆")
 
     if new_listings:
-        msg = f"📞 **【AsiaXPAT 遮罩電話雷達】新發現 {len(new_listings)} 筆聯絡號碼變化**\n"
+        msg = f"📞 **【AsiaXPAT 點擊版電話雷達】新發現 {len(new_listings)} 筆聯絡號碼變化**\n"
         msg += "-------------------------\n"
 
         for i, item in enumerate(new_listings, 1):
@@ -376,7 +370,7 @@ if __name__ == "__main__":
 
         if ok:
             save_processed_ids(processed_ids)
-            print(f"🎉 成功推送 {len(new_listings)} 筆 AsiaXPAT 遮罩電話 listing 至 Discord")
+            print(f"🎉 成功推送 {len(new_listings)} 筆 AsiaXPAT 點擊版電話 listing 至 Discord")
         else:
             print("⚠️ Discord 發送失敗，暫不保存 processed ids")
 
