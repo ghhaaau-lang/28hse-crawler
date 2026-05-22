@@ -1,25 +1,8 @@
 import re
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from pathlib import Path
+from playwright.sync_api import sync_playwright
 
-BASE = "https://www.shichengbbs.com"
-START_URL = "https://www.shichengbbs.com/#new"
-
-
-def get_headers():
-    return {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-HK,zh-TW;q=0.9,zh-CN;q=0.8,en;q=0.7",
-        "Referer": BASE,
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
+URL = "https://www.shichengbbs.com/#new"
 
 
 def clean_text(text):
@@ -43,93 +26,113 @@ def extract_sg_phones(text):
     return sorted(phones)
 
 
-def debug_page(url):
-    print("\n==============================")
-    print(f"測試 URL：{url}")
-    print("==============================")
+def main():
+    print("🚀 shichengbbs Playwright test started")
 
-    res = requests.get(url, headers=get_headers(), timeout=20)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
 
-    print(f"狀態碼：{res.status_code}")
-    print(f"Final URL：{res.url}")
-    print(f"Content-Type：{res.headers.get('content-type')}")
-    print(f"HTML 長度：{len(res.text)}")
-    print("前 500 字：")
-    print(res.text[:500].replace("\n", " ")[:500])
+        page = browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1366, "height": 768},
+            locale="zh-HK",
+        )
 
-    if res.status_code != 200:
-        return
+        try:
+            response = page.goto(URL, wait_until="networkidle", timeout=60000)
 
-    soup = BeautifulSoup(res.text, "html.parser")
+            status = response.status if response else "no response"
+            print(f"🔎 status: {status}")
+            print(f"🌐 final url: {page.url}")
+            print(f"📌 title: {page.title()}")
 
-    print("\n========== 全部 a[href] ==========")
-    links = soup.find_all("a", href=True)
-    print(f"a[href] 數量：{len(links)}")
+            html = page.content()
+            text = clean_text(page.locator("body").inner_text(timeout=10000))
 
-    for i, a in enumerate(links[:200], 1):
-        href = urljoin(res.url, a.get("href", ""))
-        text = clean_text(a.get_text(" ", strip=True))
-        print(f"{i}. {text[:60]} | {href}")
+            print(f"📄 html length: {len(html)}")
+            print(f"📝 text length: {len(text)}")
 
-    print("\n========== 可疑分類 / 帖子連結 ==========")
+            lower_html = html.lower()
+            lower_text = text.lower()
 
-    keywords = [
-        "rent", "room", "house", "property", "category", "post",
-        "ad", "item", "detail", "fang", "zu", "二手", "租房", "出租"
-    ]
+            print("\n========== Cloudflare 檢查 ==========")
+            for word in [
+                "just a moment",
+                "cloudflare",
+                "challenges.cloudflare.com",
+                "turnstile",
+                "captcha",
+                "checking your browser",
+            ]:
+                print(f"{word}: {lower_html.count(word)}")
 
-    candidates = []
+            print("\n========== 文字前 1000 字 ==========")
+            print(text[:1000])
 
-    for a in links:
-        href = urljoin(res.url, a.get("href", ""))
-        text = clean_text(a.get_text(" ", strip=True))
-        blob = (href + " " + text).lower()
+            print("\n========== 連結檢查 ==========")
+            links = page.locator("a").evaluate_all(
+                """els => els.slice(0, 200).map(a => ({
+                    text: a.innerText || '',
+                    href: a.href || ''
+                }))"""
+            )
 
-        if any(k.lower() in blob for k in keywords):
-            candidates.append((text, href))
+            print(f"a[href] sample count: {len(links)}")
 
-    print(f"可疑連結數量：{len(candidates)}")
+            candidates = []
 
-    for i, (text, href) in enumerate(candidates[:150], 1):
-        print(f"candidate {i}: {text[:80]} | {href}")
+            for item in links:
+                href = item.get("href", "")
+                link_text = clean_text(item.get("text", ""))
+                blob = (href + " " + link_text).lower()
 
-    print("\n========== 電話匹配 ==========")
-    phones = extract_sg_phones(soup.get_text(" ", strip=True))
-    print(f"電話數量：{len(phones)}")
-    for p in phones[:50]:
-        print("phone:", p)
+                if any(k in blob for k in [
+                    "rent",
+                    "room",
+                    "house",
+                    "post",
+                    "detail",
+                    "category",
+                    "租房",
+                    "出租",
+                    "二手",
+                    "电话",
+                    "電話",
+                ]):
+                    candidates.append((link_text, href))
 
-    print("\n========== script src ==========")
-    scripts = soup.find_all("script", src=True)
-    print(f"script 數量：{len(scripts)}")
-    for i, s in enumerate(scripts[:100], 1):
-        print(f"script {i}: {urljoin(res.url, s.get('src', ''))}")
+            print(f"可疑連結數量：{len(candidates)}")
 
-    print("\n========== 可疑 API / endpoint ==========")
-    html = res.text
-    patterns = [
-        r'["\'](https?://[^"\']+)["\']',
-        r'["\'](/[^"\']*(?:api|ajax|search|post|ad|category|item|detail|rent|room|house)[^"\']*)["\']',
-        r'url\s*:\s*["\']([^"\']+)["\']',
-        r'fetch\(\s*["\']([^"\']+)["\']',
-    ]
+            for i, (link_text, href) in enumerate(candidates[:80], 1):
+                print(f"candidate {i}: {link_text[:80]} | {href}")
 
-    found = set()
+            print("\n========== 電話檢查 ==========")
+            phones = extract_sg_phones(text)
+            print(f"電話數量：{len(phones)}")
+            for phone in phones[:50]:
+                print(f"phone: {phone}")
 
-    for pattern in patterns:
-        for m in re.findall(pattern, html, re.IGNORECASE | re.DOTALL):
-            if isinstance(m, tuple):
-                m = m[0]
-            m = m.strip()
-            if len(m) <= 250:
-                found.add(urljoin(res.url, m))
+            Path("shichengbbs_playwright_debug.html").write_text(html, encoding="utf-8")
+            print("✅ saved shichengbbs_playwright_debug.html")
 
-    print(f"endpoint 數量：{len(found)}")
-    for i, item in enumerate(sorted(found)[:150], 1):
-        print(f"endpoint {i}: {item}")
+        except Exception as e:
+            print(f"❌ Playwright test failed: {e}")
+
+        finally:
+            browser.close()
+
+    print("✅ shichengbbs Playwright test finished")
 
 
 if __name__ == "__main__":
-    print("🚀 shichengbbs Debug started")
-    debug_page(START_URL)
-    print("✅ shichengbbs Debug finished")
+    main()
