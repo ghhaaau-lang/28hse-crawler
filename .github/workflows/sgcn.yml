@@ -1,4 +1,4 @@
-name: SGCN Debug
+name: shichengbbs Playwright Test
 
 on:
   workflow_dispatch:
@@ -18,8 +18,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4
+          pip install playwright
+          python -m playwright install --with-deps chromium
 
-      - name: Run SGCN debug
+      - name: Run shichengbbs Playwright test
         run: |
           python sgcn_app.py
