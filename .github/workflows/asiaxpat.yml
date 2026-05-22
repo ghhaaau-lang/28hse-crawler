@@ -1,12 +1,7 @@
-name: AsiaXPAT Phone Radar
+name: AsiaXPAT Playwright Test
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   run:
@@ -15,8 +10,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -25,23 +18,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4
+          pip install playwright
+          python -m playwright install --with-deps chromium
 
-      - name: Run AsiaXPAT phone radar
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      - name: Run AsiaXPAT Playwright test
         run: |
           python asiaxpat_app.py
-
-      - name: Commit processed AsiaXPAT ids
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-
-          if [ -f processed_asiaxpat_ids.json ]; then
-            git add processed_asiaxpat_ids.json
-            git diff --cached --quiet || git commit -m "Update processed AsiaXPAT ids"
-            git push
-          else
-            echo "processed_asiaxpat_ids.json not found, skip commit"
-          fi
