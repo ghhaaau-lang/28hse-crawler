@@ -1,65 +1,60 @@
+import json
 import os
 import re
-import json
+from urllib.parse import urljoin
+
 import requests
 from bs4 import BeautifulSoup
 
+
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-LOCAL_PROCESSED_FILE = "processed_owner_ids.json"
 
-BASE = "https://www.28hse.com"
-SEARCH_PAGE = "https://www.28hse.com/rent/apartment?owner_type=1"
-DOSEARCH_URL = "https://www.28hse.com/property/dosearch"
+OWNER_PROCESSED_FILE = "processed_owner_ids.json"
+THREEZERO_PROCESSED_FILE = "processed_threezero_ids.json"
 
+HSE_BASE = "https://www.28hse.com"
+HSE_SEARCH_PAGE = "https://www.28hse.com/rent/apartment?owner_type=1"
+HSE_DOSEARCH_URL = "https://www.28hse.com/property/dosearch"
 
-def get_headers():
-    return {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "zh-HK,zh-TW;q=0.9,zh-CN;q=0.8,en;q=0.7",
-        "Referer": SEARCH_PAGE,
-        "Origin": BASE,
-        "X-Requested-With": "XMLHttpRequest",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
+THREEZERO_BASE = "https://www.threezero.com.hk"
+THREEZERO_START_URL = "https://www.threezero.com.hk/"
 
 
-def load_processed_ids():
-    if os.path.exists(LOCAL_PROCESSED_FILE):
+def clean_text(text):
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def load_processed_ids(filename):
+    if os.path.exists(filename):
         try:
-            with open(LOCAL_PROCESSED_FILE, "r", encoding="utf-8") as f:
+            with open(filename, "r", encoding="utf-8") as f:
                 ids = json.load(f).get("ids", [])
-                print(f"✅ 已讀取 {LOCAL_PROCESSED_FILE}：{len(ids)} 筆")
+                print(f"Loaded {filename}: {len(ids)} ids")
                 return set(ids)
         except Exception as e:
-            print(f"⚠️ {LOCAL_PROCESSED_FILE} 讀取失敗：{e}")
+            print(f"Failed to read {filename}: {e}")
 
-    print(f"ℹ️ 尚無 {LOCAL_PROCESSED_FILE}，將視為第一次執行")
+    print(f"No {filename}; treating this as the first run")
     return set()
 
 
-def save_processed_ids(processed_ids):
+def save_processed_ids(filename, processed_ids):
     try:
-        with open(LOCAL_PROCESSED_FILE, "w", encoding="utf-8") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             json.dump(
                 {"ids": sorted(list(processed_ids))},
                 f,
                 ensure_ascii=False,
-                indent=2
+                indent=2,
             )
-        print(f"✅ 已保存 {LOCAL_PROCESSED_FILE}：{len(processed_ids)} 筆")
+        print(f"Saved {filename}: {len(processed_ids)} ids")
     except Exception as e:
-        print(f"❌ {LOCAL_PROCESSED_FILE} 保存失敗：{e}")
+        print(f"Failed to save {filename}: {e}")
 
 
 def send_discord_message(message_text):
     if not DISCORD_WEBHOOK_URL:
-        print("❌ 找不到 DISCORD_WEBHOOK_URL，請檢查 GitHub Secrets")
+        print("DISCORD_WEBHOOK_URL is missing. Please check GitHub Secrets.")
         return False
 
     chunks = []
@@ -82,23 +77,40 @@ def send_discord_message(message_text):
             response = requests.post(
                 DISCORD_WEBHOOK_URL,
                 json={"content": chunk},
-                timeout=15
+                timeout=15,
             )
 
             if response.status_code in [200, 204]:
-                print(f"✨ [Discord] 第 {index}/{len(chunks)} 段訊息發送成功")
+                print(f"[Discord] Sent chunk {index}/{len(chunks)}")
                 success_count += 1
             else:
-                print(f"❌ [Discord] 發送失敗：{response.status_code}")
+                print(f"[Discord] Send failed: {response.status_code}")
                 print(response.text[:500])
 
         except Exception as e:
-            print(f"❌ [Discord] 連線失敗：{e}")
+            print(f"[Discord] Connection failed: {e}")
 
     return success_count == len(chunks)
 
 
-def build_params():
+def hse_headers():
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "zh-HK,zh-TW;q=0.9,zh-CN;q=0.8,en;q=0.7",
+        "Referer": HSE_SEARCH_PAGE,
+        "Origin": HSE_BASE,
+        "X-Requested-With": "XMLHttpRequest",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
+
+def hse_search_params():
     return {
         "page": "1",
         "searchText": "",
@@ -147,17 +159,11 @@ def build_params():
         "developer_by_text": "0",
         "more_options": "",
         "more_options_by_text": "0",
-
-        # 第一層：要求 28hse 回業主類型
         "owner_type": "1",
     }
 
 
-def clean_text(text):
-    return re.sub(r"\s+", " ", text or "").strip()
-
-
-def normalize_link(link):
+def normalize_hse_link(link):
     if not link:
         return ""
 
@@ -165,17 +171,14 @@ def normalize_link(link):
 
     if link.startswith("http"):
         return link
-
     if link.startswith("//"):
         return "https:" + link
-
     if link.startswith("/"):
-        return BASE + link
+        return HSE_BASE + link
+    return HSE_BASE + "/" + link
 
-    return BASE + "/" + link
 
-
-def extract_result_html_from_json(data):
+def extract_hse_result_html(data):
     paths = [
         ["data", "results", "resultContentHtml"],
         ["result", "resultContentHtml"],
@@ -185,33 +188,26 @@ def extract_result_html_from_json(data):
 
     for path in paths:
         cur = data
-        ok = True
 
         for key in path:
             if isinstance(cur, dict) and key in cur:
                 cur = cur[key]
             else:
-                ok = False
                 break
+        else:
+            if isinstance(cur, str) and cur.strip():
+                print(f"Found resultContentHtml path: {'.'.join(path)}")
+                return cur
 
-        if ok and isinstance(cur, str) and cur.strip():
-            print(f"✅ 找到 resultContentHtml path：{'.'.join(path)}")
-            return cur
-
-    print("❌ 找不到 resultContentHtml")
+    print("Could not find resultContentHtml")
     return ""
 
 
-def parse_result_content_html(html):
-    """
-    超嚴格業主版：
-    只有卡片文字明確出現 業主 / 免佣 / 自讓 / 直接業主，才通知。
-    其他全部跳過。
-    """
+def parse_hse_result_content_html(html):
     soup = BeautifulSoup(html, "html.parser")
     links = soup.find_all("a", href=True)
 
-    print(f"🔗 resultContentHtml a[href] 數量：{len(links)}")
+    print(f"28hse a[href] count: {len(links)}")
 
     owner_keywords = [
         "業主",
@@ -242,21 +238,21 @@ def parse_result_content_html(html):
     skipped_agent = 0
 
     for a in links:
-        raw_href = a.get("href", "")
-        href = normalize_link(raw_href)
+        href = normalize_hse_link(a.get("href", ""))
         text = clean_text(a.get_text(" ", strip=True))
 
         match = re.search(r"/rent/apartment/property-(\d+)", href)
-
         if not match:
             continue
 
         property_id = match.group(1)
         house_id = f"28hse_{property_id}"
 
-        # 找外層卡片，盡量拿整張卡片文字判斷
         card = (
-            a.find_parent("div", class_=re.compile(r"(result|property|listing|item|estate|search|content)", re.I))
+            a.find_parent(
+                "div",
+                class_=re.compile(r"(result|property|listing|item|estate|search|content)", re.I),
+            )
             or a.find_parent("div")
         )
 
@@ -268,79 +264,70 @@ def parse_result_content_html(html):
 
         if has_agent_keyword:
             skipped_agent += 1
-            print(f"🚫 排除房仲/代理盤：{property_id} | {card_text[:100]}")
+            print(f"Skip agent listing: {property_id} | {card_text[:100]}")
             continue
 
         if not has_owner_keyword:
             skipped_not_owner += 1
-            print(f"⚠️ 跳過非明確業主盤：{property_id} | {card_text[:100]}")
+            print(f"Skip non-explicit owner listing: {property_id} | {card_text[:100]}")
             continue
 
-        # 標題優先用 a text，太短就用卡片文字
         title = text
-
         if len(title) <= 2:
             title = card_text
 
-        title = clean_text(title)
+        title = clean_text(title) or "28hse 業主盤"
 
-        if not title:
-            title = "28hse 業主盤"
+        existing = listings.get(house_id)
+        listing = {
+            "id": house_id,
+            "title": f"[28hse業主] {title[:90]}",
+            "link": href,
+        }
 
-        if house_id not in listings:
-            listings[house_id] = {
-                "id": house_id,
-                "title": f"[28hse業主] {title[:90]}",
-                "link": href,
-            }
-        else:
-            old_title = listings[house_id]["title"]
-            new_title = f"[28hse業主] {title[:90]}"
-
-            if len(new_title) > len(old_title):
-                listings[house_id]["title"] = new_title
+        if not existing or len(listing["title"]) > len(existing["title"]):
+            listings[house_id] = listing
 
     final = list(listings.values())
 
-    print(f"🚫 排除房仲/代理盤：{skipped_agent} 次")
-    print(f"⚠️ 跳過非明確業主盤：{skipped_not_owner} 次")
-    print(f"✅ 超嚴格業主盤解析到：{len(final)} 筆")
+    print(f"Skipped agent listings: {skipped_agent}")
+    print(f"Skipped non-explicit owner listings: {skipped_not_owner}")
+    print(f"Parsed 28hse owner listings: {len(final)}")
 
     for i, item in enumerate(final[:10], 1):
-        print(f"owner sample {i}: {item['title']} | {item['link']}")
+        print(f"28hse sample {i}: {item['title']} | {item['link']}")
 
     return final
 
 
 def crawl_28hse_dosearch():
     session = requests.Session()
-    headers = get_headers()
-    params = build_params()
+    headers = hse_headers()
 
-    print("🚀 28hse /property/dosearch 超嚴格業主版 started")
+    print("28hse crawler started")
 
     first = session.get(
-        SEARCH_PAGE,
+        HSE_SEARCH_PAGE,
         headers={
             **headers,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
-        timeout=20
+        timeout=20,
     )
 
-    print(f"🔎 搜尋頁狀態碼：{first.status_code}")
-    print(f"🍪 cookies 數量：{len(session.cookies)}")
+    print(f"28hse search status: {first.status_code}")
+    print(f"28hse cookies count: {len(session.cookies)}")
 
     response = session.get(
-        DOSEARCH_URL,
+        HSE_DOSEARCH_URL,
         headers=headers,
-        params=params,
-        timeout=20
+        params=hse_search_params(),
+        timeout=20,
     )
 
-    print(f"🔎 dosearch 狀態碼：{response.status_code}")
-    print(f"📄 dosearch 回應長度：{len(response.text)}")
-    print(f"Content-Type：{response.headers.get('content-type')}")
+    print(f"28hse dosearch status: {response.status_code}")
+    print(f"28hse dosearch response length: {len(response.text)}")
+    print(f"28hse Content-Type: {response.headers.get('content-type')}")
 
     if response.status_code != 200:
         print(response.text[:1000])
@@ -348,63 +335,168 @@ def crawl_28hse_dosearch():
 
     try:
         data = response.json()
-        print("✅ dosearch 回應可解析為 JSON")
-        print("JSON 頂層 keys：", list(data.keys())[:30])
+        print("28hse dosearch response parsed as JSON")
+        print("28hse JSON top-level keys:", list(data.keys())[:30])
     except Exception as e:
-        print(f"❌ JSON 解析失敗：{e}")
+        print(f"28hse JSON parse failed: {e}")
         print(response.text[:1000])
         return []
 
-    result_html = extract_result_html_from_json(data)
-
+    result_html = extract_hse_result_html(data)
     if not result_html:
-        print("⚠️ 無 resultContentHtml，印出 JSON 前 1000 字")
+        print("No 28hse resultContentHtml; JSON preview:")
         print(json.dumps(data, ensure_ascii=False)[:1000])
         return []
 
-    print(f"🧩 resultContentHtml 長度：{len(result_html)}")
+    print(f"28hse resultContentHtml length: {len(result_html)}")
+    return parse_hse_result_content_html(result_html)
 
-    return parse_result_content_html(result_html)
+
+def threezero_headers():
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-HK,zh-TW;q=0.9,zh-CN;q=0.8,en;q=0.7",
+        "Referer": THREEZERO_BASE,
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
 
 
-if __name__ == "__main__":
-    print("🚀 Crawler started")
+def parse_threezero_listings(html, page_url):
+    soup = BeautifulSoup(html, "html.parser")
+    links = soup.find_all("a", href=True)
 
-    if DISCORD_WEBHOOK_URL:
-        print("✅ DISCORD_WEBHOOK_URL 已讀取")
-    else:
-        print("❌ DISCORD_WEBHOOK_URL 未讀取")
+    print(f"threezero a[href] count: {len(links)}")
 
-    processed_ids = load_processed_ids()
+    listings = {}
 
-    all_listings = crawl_28hse_dosearch()
+    for a in links:
+        full_link = urljoin(page_url, a.get("href", ""))
+        text = clean_text(a.get_text(" ", strip=True))
 
-    print(f"📦 總共抓到明確業主樓盤：{len(all_listings)} 筆")
+        if "/singleproperty/" not in full_link:
+            continue
+        if "threezero.com.hk" not in full_link:
+            continue
+
+        slug = full_link.rstrip("/").split("/singleproperty/")[-1]
+        if not slug:
+            continue
+
+        title = text or "threezero 租盤"
+        if len(title) < 3:
+            title = "threezero 租盤"
+
+        house_id = f"threezero_{slug}"
+        listings[house_id] = {
+            "id": house_id,
+            "title": f"[threezero免佣] {title[:120]}",
+            "link": full_link,
+        }
+
+    final = list(listings.values())
+
+    print(f"Parsed threezero listings: {len(final)}")
+
+    for i, item in enumerate(final[:10], 1):
+        print(f"threezero sample {i}: {item['title']} | {item['link']}")
+
+    return final
+
+
+def crawl_threezero():
+    print("threezero crawler started")
+
+    session = requests.Session()
+
+    try:
+        response = session.get(THREEZERO_START_URL, headers=threezero_headers(), timeout=20)
+
+        print(f"threezero status: {response.status_code}")
+        print(f"threezero HTML length: {len(response.text)}")
+        print(f"threezero final URL: {response.url}")
+
+        if response.status_code != 200:
+            print(response.text[:1000])
+            return []
+
+        return parse_threezero_listings(response.text, response.url)
+
+    except Exception as e:
+        print(f"threezero crawl failed: {e}")
+        return []
+
+
+def run_crawler(name, crawl_func, processed_file, message_title, empty_message):
+    print(f"===== {name} started =====")
+    processed_ids = load_processed_ids(processed_file)
+
+    all_listings = crawl_func()
+    print(f"{name} total listings: {len(all_listings)}")
 
     new_listings = [
         item for item in all_listings
         if item["id"] not in processed_ids
     ]
 
-    print(f"🆕 新明確業主樓盤：{len(new_listings)} 筆")
+    print(f"{name} new listings: {len(new_listings)}")
 
-    if new_listings:
-        msg = f"🏠 **【28hse 明確業主盤通知】新發現 {len(new_listings)} 筆**\n"
+    if not new_listings:
+        print(empty_message)
+        print(f"===== {name} finished =====")
+        return
+
+    msg = f"🏠 **【{message_title}】新發現 {len(new_listings)} 筆**\n"
+    msg += "-------------------------\n"
+
+    for i, house in enumerate(new_listings, 1):
+        msg += f"**{i}. {house['title']}**\n"
+        msg += f"🔗 詳情：{house['link']}\n"
         msg += "-------------------------\n"
+        processed_ids.add(house["id"])
 
-        for i, house in enumerate(new_listings, 1):
-            msg += f"**{i}. {house['title']}**\n"
-            msg += f"🔗 詳情：{house['link']}\n"
-            msg += "-------------------------\n"
-            processed_ids.add(house["id"])
+    ok = send_discord_message(msg)
 
-        ok = send_discord_message(msg)
-
-        if ok:
-            save_processed_ids(processed_ids)
-            print(f"🎉 成功推送 {len(new_listings)} 筆明確業主盤至 Discord")
-        else:
-            print("⚠️ Discord 發送失敗，暫不保存 processed ids，避免漏通知")
-
+    if ok:
+        save_processed_ids(processed_file, processed_ids)
+        print(f"{name} pushed {len(new_listings)} new listings to Discord")
     else:
-        print("沒有新的明確業主樓盤更新。")
+        print(f"{name} Discord send failed; processed ids were not saved")
+
+    print(f"===== {name} finished =====")
+
+
+def main():
+    print("Combined crawler started")
+
+    if DISCORD_WEBHOOK_URL:
+        print("DISCORD_WEBHOOK_URL loaded")
+    else:
+        print("DISCORD_WEBHOOK_URL missing")
+
+    run_crawler(
+        name="28hse",
+        crawl_func=crawl_28hse_dosearch,
+        processed_file=OWNER_PROCESSED_FILE,
+        message_title="28hse 明確業主盤通知",
+        empty_message="沒有新的明確業主樓盤更新。",
+    )
+
+    run_crawler(
+        name="threezero",
+        crawl_func=crawl_threezero,
+        processed_file=THREEZERO_PROCESSED_FILE,
+        message_title="threezero 免佣租盤通知",
+        empty_message="沒有新的 threezero 租盤更新。",
+    )
+
+    print("Combined crawler finished")
+
+
+if __name__ == "__main__":
+    main()
