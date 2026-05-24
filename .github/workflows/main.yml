@@ -1,4 +1,4 @@
-name: 28hse Discord Crawler
+name: Rent Discord Crawlers
 
 on:
   schedule:
@@ -7,6 +7,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: rent-crawlers
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -27,21 +31,35 @@ jobs:
         run: |
           pip install requests beautifulsoup4
 
-      - name: Run crawler
+      - name: Run combined crawlers
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python app.py
 
-      - name: Commit processed owner ids
+      - name: Commit processed ids
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
+          files=""
+
           if [ -f processed_owner_ids.json ]; then
-            git add processed_owner_ids.json
-            git diff --cached --quiet || git commit -m "Update processed owner ids"
-            git push
+            files="$files processed_owner_ids.json"
+          fi
+
+          if [ -f processed_threezero_ids.json ]; then
+            files="$files processed_threezero_ids.json"
+          fi
+
+          if [ -n "$files" ]; then
+            git add $files
+            if git diff --cached --quiet; then
+              echo "No processed id changes to commit"
+            else
+              git commit -m "Update processed crawler ids"
+              git push
+            fi
           else
-            echo "processed_owner_ids.json not found, skip commit"
+            echo "No processed id files found, skip commit"
           fi
