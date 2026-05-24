@@ -539,6 +539,7 @@ def run_threezero_crawler():
     print(f"threezero total listings checked: {len(all_listings)}")
 
     new_listings = []
+    migrated_phone_keys = set()
 
     for item in all_listings:
         phone_keys = [f"phone:{phone}" for phone in item.get("phones", [])]
@@ -548,14 +549,25 @@ def run_threezero_crawler():
             continue
 
         new_phone_keys = [key for key in phone_keys if key not in processed_ids]
+        has_saved_phone_key = any(key in processed_ids for key in phone_keys)
 
         if new_phone_keys:
+            if item["id"] in processed_ids and not has_saved_phone_key:
+                print(f"Migrate existing threezero listing to phone keys: {item['link']}")
+                migrated_phone_keys.update(new_phone_keys)
+                continue
+
             item["new_phone_keys"] = new_phone_keys
             new_listings.append(item)
 
     print(f"threezero listings with new phone numbers: {len(new_listings)}")
 
     if not new_listings:
+        if migrated_phone_keys:
+            processed_ids.update(migrated_phone_keys)
+            save_processed_ids(THREEZERO_PROCESSED_FILE, processed_ids)
+            print(f"Migrated {len(migrated_phone_keys)} threezero phone numbers without notification")
+
         print("沒有新的 threezero 電話號碼更新。")
         print("===== threezero finished =====")
         return
@@ -572,6 +584,8 @@ def run_threezero_crawler():
     ok = send_discord_message(msg)
 
     if ok:
+        processed_ids.update(migrated_phone_keys)
+
         for house in new_listings:
             processed_ids.update(house["new_phone_keys"])
         save_processed_ids(THREEZERO_PROCESSED_FILE, processed_ids)
