@@ -367,6 +367,40 @@ def threezero_headers():
     }
 
 
+def normalize_phone_number(value):
+    digits = re.sub(r"\D+", "", value or "")
+
+    if digits.startswith("852") and len(digits) == 11:
+        digits = digits[3:]
+
+    if re.fullmatch(r"[235689]\d{7}", digits):
+        return digits
+
+    return ""
+
+
+def extract_phone_numbers(html):
+    soup = BeautifulSoup(html, "html.parser")
+    phones = set()
+
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        if href.lower().startswith("tel:"):
+            phone = normalize_phone_number(href)
+            if phone:
+                phones.add(phone)
+
+    text = soup.get_text(" ", strip=True)
+    phone_pattern = re.compile(r"(?:\+?852[\s-]*)?([235689]\d[\s-]*\d{2}[\s-]*\d{4})")
+
+    for match in phone_pattern.finditer(text):
+        phone = normalize_phone_number(match.group(1))
+        if phone:
+            phones.add(phone)
+
+    return sorted(phones)
+
+
 def parse_threezero_listings(html, page_url):
     soup = BeautifulSoup(html, "html.parser")
     links = soup.find_all("a", href=True)
@@ -395,7 +429,7 @@ def parse_threezero_listings(html, page_url):
         house_id = f"threezero_{slug}"
         listings[house_id] = {
             "id": house_id,
-            "title": f"[threezero免佣] {title[:120]}",
+            "title": f"[threezero] {title[:120]}",
             "link": full_link,
         }
 
@@ -407,6 +441,31 @@ def parse_threezero_listings(html, page_url):
         print(f"threezero sample {i}: {item['title']} | {item['link']}")
 
     return final
+
+
+def add_threezero_phone_numbers(session, listings):
+    checked = []
+
+    for item in listings:
+        try:
+            response = session.get(item["link"], headers=threezero_headers(), timeout=20)
+            print(f"threezero detail status: {response.status_code} | {item['link']}")
+
+            if response.status_code != 200:
+                item["phones"] = []
+                checked.append(item)
+                continue
+
+            item["phones"] = extract_phone_numbers(response.text)
+            print(f"threezero phones found: {len(item['phones'])} | {item['phones']}")
+            checked.append(item)
+
+        except Exception as e:
+            item["phones"] = []
+            print(f"threezero detail failed: {e} | {item['link']}")
+            checked.append(item)
+
+    return checked
 
 
 def crawl_threezero():
@@ -425,7 +484,8 @@ def crawl_threezero():
             print(response.text[:1000])
             return []
 
-        return parse_threezero_listings(response.text, response.url)
+        listings = parse_threezero_listings(response.text, response.url)
+        return add_threezero_phone_numbers(session, listings)
 
     except Exception as e:
         print(f"threezero crawl failed: {e}")
@@ -471,6 +531,57 @@ def run_crawler(name, crawl_func, processed_file, message_title, empty_message):
     print(f"===== {name} finished =====")
 
 
+def run_threezero_crawler():
+    print("===== threezero started =====")
+    processed_ids = load_processed_ids(THREEZERO_PROCESSED_FILE)
+
+    all_listings = crawl_threezero()
+    print(f"threezero total listings checked: {len(all_listings)}")
+
+    new_listings = []
+
+    for item in all_listings:
+        phone_keys = [f"phone:{phone}" for phone in item.get("phones", [])]
+
+        if not phone_keys:
+            print(f"Skip threezero listing with no phone number: {item['link']}")
+            continue
+
+        new_phone_keys = [key for key in phone_keys if key not in processed_ids]
+
+        if new_phone_keys:
+            item["new_phone_keys"] = new_phone_keys
+            new_listings.append(item)
+
+    print(f"threezero listings with new phone numbers: {len(new_listings)}")
+
+    if not new_listings:
+        print("沒有新的 threezero 電話號碼更新。")
+        print("===== threezero finished =====")
+        return
+
+    msg = f"🏠 **【threezero 租盤電話通知】新發現 {len(new_listings)} 筆**\n"
+    msg += "-------------------------\n"
+
+    for i, house in enumerate(new_listings, 1):
+        msg += f"**{i}. {house['title']}**\n"
+        msg += f"📞 電話：{', '.join(house.get('phones', []))}\n"
+        msg += f"🔗 詳情：{house['link']}\n"
+        msg += "-------------------------\n"
+
+    ok = send_discord_message(msg)
+
+    if ok:
+        for house in new_listings:
+            processed_ids.update(house["new_phone_keys"])
+        save_processed_ids(THREEZERO_PROCESSED_FILE, processed_ids)
+        print(f"threezero pushed {len(new_listings)} listings with new phone numbers to Discord")
+    else:
+        print("threezero Discord send failed; processed phone numbers were not saved")
+
+    print("===== threezero finished =====")
+
+
 def main():
     print("Combined crawler started")
 
@@ -487,13 +598,7 @@ def main():
         empty_message="沒有新的明確業主樓盤更新。",
     )
 
-    run_crawler(
-        name="threezero",
-        crawl_func=crawl_threezero,
-        processed_file=THREEZERO_PROCESSED_FILE,
-        message_title="threezero 免佣租盤通知",
-        empty_message="沒有新的 threezero 租盤更新。",
-    )
+    run_threezero_crawler()
 
     print("Combined crawler finished")
 
